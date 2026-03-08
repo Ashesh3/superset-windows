@@ -80,6 +80,11 @@ jobs:
         shell: bash
         run: bun install
 
+      - name: Generate file icons
+        working-directory: superset/apps/desktop
+        shell: bash
+        run: bun run generate:icons
+
       - name: Build app
         working-directory: superset/apps/desktop
         shell: bash
