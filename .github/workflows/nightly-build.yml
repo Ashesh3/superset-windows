@@ -48,9 +48,8 @@ jobs:
       - name: Clone upstream Superset
         shell: bash
         run: |
+          git config --global core.longpaths true
           git clone --depth 1 --branch ${{ needs.check.outputs.upstream_version }} https://github.com/superset-sh/superset.git superset
-          cd superset
-          git config core.longpaths true
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
