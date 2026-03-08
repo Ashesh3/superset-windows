@@ -626,13 +626,105 @@ Find the `"build"` script. Add `--config electron-builder.ts` to the electron-bu
 
 ---
 
+## Patch 14: Materialize @lydell/node-pty platform binary from Bun store
+
+**Why:** `@lydell/node-pty` loads its native binary via `require("@lydell/node-pty-win32-x64/conpty.node")`. Bun keeps optional dependencies in its internal `.bun/` store, so they're not resolvable from the desktop workspace's `node_modules`. Without this, PTY spawn fails with "PTY not spawned".
+
+**File: `apps/desktop/scripts/copy-native-modules.ts`**
+
+1. After the `NATIVE_MODULE_DEPS` array, add a new array for platform-specific optional modules:
+   ```typescript
+   // Platform-specific optional native packages that must be materialized from Bun's store.
+   // @lydell/node-pty uses optionalDependencies for platform binaries, but Bun keeps them
+   // in .bun/ and they aren't resolvable from the desktop workspace without explicit copying.
+   const OPTIONAL_PLATFORM_MODULES = [
+     ...(process.platform === "win32" ? ["@lydell/node-pty-win32-x64"] : []),
+     ...(process.platform === "darwin" && process.arch === "arm64" ? ["@lydell/node-pty-darwin-arm64"] : []),
+     ...(process.platform === "darwin" && process.arch === "x64" ? ["@lydell/node-pty-darwin-x64"] : []),
+     ...(process.platform === "linux" && process.arch === "x64" ? ["@lydell/node-pty-linux-x64"] : []),
+     ...(process.platform === "linux" && process.arch === "arm64" ? ["@lydell/node-pty-linux-arm64"] : []),
+   ] as const;
+   ```
+
+2. In the `prepareNativeModules()` function, before `console.log("\nDone!");`, add a block to copy these platform modules from Bun's store:
+   ```typescript
+   if (OPTIONAL_PLATFORM_MODULES.length > 0) {
+     console.log("\nPreparing platform-specific optional modules...");
+     const bunStoreDir = getBunStoreDir(nodeModulesDir);
+     for (const moduleName of OPTIONAL_PLATFORM_MODULES) {
+       const destPath = join(nodeModulesDir, moduleName);
+       if (existsSync(destPath)) {
+         console.log(`  ${moduleName}: already exists`);
+         continue;
+       }
+       // Search Bun store for the package
+       const bunPrefix = moduleName.startsWith("@")
+         ? moduleName.replace("/", "+")
+         : moduleName;
+       const bunStoreEntries = existsSync(bunStoreDir)
+         ? readdirSync(bunStoreDir).filter((e) => e.startsWith(`${bunPrefix}@`))
+         : [];
+       if (bunStoreEntries.length === 0) {
+         console.warn(`  ${moduleName}: not found in Bun store (skipping)`);
+         continue;
+       }
+       const sourcePath = join(
+         bunStoreDir,
+         bunStoreEntries.sort().reverse()[0],
+         "node_modules",
+         moduleName,
+       );
+       if (!existsSync(sourcePath)) {
+         console.warn(`  ${moduleName}: Bun store path missing (${sourcePath})`);
+         continue;
+       }
+       console.log(`  ${moduleName}: copying from Bun store`);
+       mkdirSync(dirname(destPath), { recursive: true });
+       cpSync(sourcePath, destPath, { recursive: true });
+     }
+   }
+   ```
+
+   Note: `getBunStoreDir`, `mkdirSync`, `dirname`, `readdirSync`, `cpSync`, `existsSync` should already be imported/available in this file. Verify before adding.
+
+---
+
+## Patch 15: Use \r instead of \n for terminal command execution on Windows
+
+**Why:** Windows ConPTY expects `\r` (carriage return) to trigger command execution, not `\n` (linefeed). Without this, agent launch commands are typed into the terminal but not executed — the user has to manually press Enter.
+
+**File: `apps/desktop/src/renderer/lib/terminal/launch-command.ts`**
+
+Find the `normalizeTerminalCommand` function:
+```typescript
+function normalizeTerminalCommand(command: string): string {
+  return command.endsWith("\n") ? command : `${command}\n`;
+}
+```
+
+Replace with:
+```typescript
+function normalizeTerminalCommand(command: string): string {
+  // Windows ConPTY expects \r (carriage return) to execute a command,
+  // while Unix terminals use \n (newline). Use \r for cross-platform compat
+  // as most Unix terminal emulators also accept \r.
+  const eol = "\r";
+  return command.endsWith("\n") || command.endsWith("\r")
+    ? command
+    : `${command}${eol}`;
+}
+```
+
+---
+
 ## Verification Checklist
 
 After applying all patches, verify:
 - [ ] `bun install` completes (bufferutil warning is expected and non-fatal)
 - [ ] `bun run compile:app` builds with 0 TypeScript errors
 - [ ] `electron dist/main/index.js` launches without TDZ or path errors
-- [ ] Terminal opens without "Connection lost" errors
+- [ ] Terminal opens without "Connection lost" or "PTY not spawned" errors
+- [ ] Agent launch (click Claude/Codex) auto-executes the command (no manual Enter needed)
 - [ ] Changes panel loads (no "Unable to load changes")
 - [ ] "Open in VS Code" works
 - [ ] NSIS installer builds successfully
