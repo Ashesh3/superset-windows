@@ -1,0 +1,109 @@
+name: Nightly Windows Build
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * *'  # 12:00 AM UTC daily
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.compare.outputs.should_build }}
+      upstream_version: ${{ steps.compare.outputs.upstream_version }}
+    steps:
+      - name: Check upstream for new release
+        id: compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Get latest release from upstream
+          LATEST=$(gh release view --repo superset-sh/superset --json tagName -q .tagName 2>/dev/null || echo "")
+          if [ -z "$LATEST" ]; then
+            echo "No upstream release found"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "upstream_version=$LATEST" >> $GITHUB_OUTPUT
+
+          # Check if we already have this version
+          if gh release view "$LATEST" --repo ${{ github.repository }} &>/dev/null; then
+            echo "Already built $LATEST"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "New version found: $LATEST"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.should_build == 'true'
+    runs-on: windows-latest
+    steps:
+      - name: Checkout patches repo
+        uses: actions/checkout@v5
+
+      - name: Clone upstream Superset
+        shell: bash
+        run: |
+          git clone --depth 1 --branch ${{ needs.check.outputs.upstream_version }} https://github.com/superset-sh/superset.git superset
+          cd superset
+          git config core.longpaths true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install Copilot CLI
+        run: npm install -g @github/copilot
+
+      - name: Apply Windows patches
+        working-directory: superset
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_PAT }}
+        shell: bash
+        run: |
+          PATCHES_CONTENT=$(cat ../PATCHES.md)
+          copilot -p "You are inside a fresh clone of superset-sh/superset. Apply ALL the patches described below to the codebase. Read each target file before editing. Create new files where specified. Do not skip any patch.
+
+          $PATCHES_CONTENT"
+
+      - name: Install dependencies
+        working-directory: superset
+        shell: bash
+        run: bun install
+
+      - name: Build app
+        working-directory: superset/apps/desktop
+        shell: bash
+        run: bun run compile:app
+
+      - name: Build Windows installer
+        working-directory: superset/apps/desktop
+        shell: bash
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --win --config electron-builder.ts
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          VERSION="${{ needs.check.outputs.upstream_version }}"
+          gh release create "$VERSION" \
+            superset/apps/desktop/release/Superset-*-x64.exe \
+            --repo ${{ github.repository }} \
+            --title "Superset $VERSION (Windows)" \
+            --notes "Automated Windows build of [superset-sh/superset](https://github.com/superset-sh/superset) $VERSION.
+
+          Built with Windows compatibility patches applied via AI agent.
+          See [PATCHES.md](https://github.com/${{ github.repository }}/blob/main/PATCHES.md) for details."
