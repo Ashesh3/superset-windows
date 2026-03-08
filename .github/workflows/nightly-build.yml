@@ -90,7 +90,7 @@ jobs:
         shell: bash
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-        run: npx electron-builder --win --config electron-builder.ts
+        run: npx electron-builder --win --publish never --config electron-builder.ts
 
       - name: Create GitHub Release
         env:
