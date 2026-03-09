@@ -61,17 +61,24 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Install Copilot CLI
-        run: npm install -g @github/copilot
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
 
       - name: Apply Windows patches
         working-directory: superset
         env:
-          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_PAT }}
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
+          ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ secrets.ANTHROPIC_DEFAULT_SONNET_MODEL }}
+          ANTHROPIC_SMALL_FAST_MODEL: ${{ secrets.ANTHROPIC_SMALL_FAST_MODEL }}
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ secrets.ANTHROPIC_DEFAULT_HAIKU_MODEL }}
+          DISABLE_NON_ESSENTIAL_MODEL_CALLS: '1'
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
         shell: bash
         run: |
           PATCHES_CONTENT=$(cat ../PATCHES.md)
-          copilot --yolo --model claude-opus-4.6-1m -p "You are inside a fresh clone of superset-sh/superset. Apply ALL the patches described below to the codebase. Read each target file before editing. Create new files where specified. Do not skip any patch.
+          claude --dangerously-skip-permissions -p "You are inside a fresh clone of superset-sh/superset. Apply ALL the patches described below to the codebase. Read each target file before editing. Create new files where specified. Do not skip any patch.
 
           $PATCHES_CONTENT"
 
