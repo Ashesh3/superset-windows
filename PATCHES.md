@@ -276,25 +276,32 @@ Find the production branch that loads from file (the `else` clause after the dev
 
 ## Patch 6: Feature flag default to prevent infinite render block
 
-**Why:** When PostHog is not configured (no key), feature flags stay `undefined` forever. The app blocks rendering waiting for them.
+**Why:** When PostHog is not configured (no key), feature flags stay `undefined` forever. The app blocks rendering waiting for them, causing a permanent blank/white screen.
 
 **File: `apps/desktop/src/renderer/routes/_authenticated/providers/CollectionsProvider/CollectionsProvider.tsx`**
 
-Find the block that returns `null` when the feature flag is undefined (something like):
+Find the block that returns `null` when the feature flag is undefined. It looks like this (may include an `env.SKIP_ENV_VALIDATION` guard):
 ```typescript
-if (useElectricCloud === undefined) {
+if (useElectricCloud === undefined && !env.SKIP_ENV_VALIDATION) {
   return null;
 }
 ```
 
-Replace with:
+**Delete that entire `if` block** (remove all 3 lines). Then, immediately before the `setElectricUrl(...)` call, add:
 ```typescript
 // When PostHog is not configured (no key), feature flags stay undefined forever.
 // Default to false (use proxy) so the app doesn't block rendering.
 const isElectricCloud = useElectricCloud ?? false;
 ```
 
-Then replace all subsequent references to `useElectricCloud` (in the `setElectricUrl` call) with `isElectricCloud`.
+Then change the `setElectricUrl` call to use `isElectricCloud` instead of `useElectricCloud`:
+```typescript
+setElectricUrl(
+  isElectricCloud
+    ? env.NEXT_PUBLIC_ELECTRIC_URL
+    : env.NEXT_PUBLIC_ELECTRIC_PROXY_URL,
+);
+```
 
 ---
 
