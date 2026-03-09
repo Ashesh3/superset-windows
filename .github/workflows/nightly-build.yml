@@ -109,6 +109,10 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: npx electron-builder --win --publish never --config electron-builder.ts
 
+      - name: Archive patched source
+        shell: bash
+        run: tar -czf superset-patched-source.tar.gz --exclude='node_modules' --exclude='.bun' --exclude='dist' --exclude='release' superset/
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -117,9 +121,14 @@ jobs:
           VERSION="${{ needs.check.outputs.upstream_version }}"
           gh release create "$VERSION" \
             superset/apps/desktop/release/Superset-*-x64.exe \
+            superset-patched-source.tar.gz \
             --repo ${{ github.repository }} \
             --title "Superset $VERSION (Windows)" \
             --notes "Automated Windows build of [superset-sh/superset](https://github.com/superset-sh/superset) $VERSION.
 
           Built with Windows compatibility patches applied via AI agent.
-          See [PATCHES.md](https://github.com/${{ github.repository }}/blob/main/PATCHES.md) for details."
+          See [PATCHES.md](https://github.com/${{ github.repository }}/blob/main/PATCHES.md) for details.
+
+          **Assets:**
+          - \`Superset-$VERSION-x64.exe\` — Windows installer
+          - \`superset-patched-source.tar.gz\` — Modified source code (for reviewing AI changes)"
