@@ -90,6 +90,11 @@ jobs:
         shell: bash
         run: bun run compile:app
 
+      - name: Prepare native modules
+        working-directory: superset/apps/desktop
+        shell: bash
+        run: bun run copy:native-modules
+
       - name: Build Windows installer
         working-directory: superset/apps/desktop
         shell: bash

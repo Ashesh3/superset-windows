@@ -8,8 +8,10 @@ After all patches are applied, run:
 ```bash
 bun install
 cd apps/desktop
+bun run generate:icons
 bun run compile:app
-CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --win --config electron-builder.ts
+bun run copy:native-modules
+CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --win --publish never --config electron-builder.ts
 ```
 
 The installer will be at `apps/desktop/release/Superset-<version>-x64.exe`.
