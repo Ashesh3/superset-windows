@@ -796,34 +796,9 @@ $p.Close()
 
 ---
 
-## Patch 17: Windows keyboard shortcuts for workspace switching
+## Patch 17: Fix workspace switching shortcut display on Windows
 
-**Why:** The workspace switching shortcuts are defined as `meta+1` through `meta+9` (⌘+1-9 on macOS). On Windows/Linux, `deriveNonMacDefault` converts these to `ctrl+shift+1` through `ctrl+shift+9`, which is awkward. Alt+1-9 is more natural (matches browser tab switching conventions). Additionally, the sidebar tooltip hardcodes the ⌘ symbol on all platforms instead of showing the correct modifier.
-
-**File: `apps/desktop/src/shared/hotkeys.ts`**
-
-Find the workspace switching hotkey definitions (`JUMP_TO_WORKSPACE_1` through `JUMP_TO_WORKSPACE_9`). Add explicit `win32` and `linux` defaults using `alt+N` instead of letting `deriveNonMacDefault` generate `ctrl+shift+N`.
-
-Change each one from:
-```typescript
-JUMP_TO_WORKSPACE_1: defineHotkey({
-  keys: "meta+1",
-  label: "Switch to Workspace 1",
-  category: "Workspace",
-}),
-```
-
-To:
-```typescript
-JUMP_TO_WORKSPACE_1: defineHotkey({
-  keys: "meta+1",
-  label: "Switch to Workspace 1",
-  category: "Workspace",
-  defaults: { win32: "alt+1", linux: "alt+1" },
-}),
-```
-
-Apply the same pattern for `JUMP_TO_WORKSPACE_2` through `JUMP_TO_WORKSPACE_9`, using `alt+2` through `alt+9` respectively.
+**Why:** The sidebar tooltip hardcodes the `⌘` symbol on all platforms. On Windows/Linux the actual keybinding is `Ctrl+Shift+1-9` (correctly derived by `deriveNonMacDefault`), but the UI still shows `⌘1`. The display should match the actual shortcut.
 
 **File: `apps/desktop/src/renderer/screens/main/components/WorkspaceSidebar/WorkspaceListItem/WorkspaceListItem.tsx`**
 
@@ -847,7 +822,7 @@ Apply the same pattern for `JUMP_TO_WORKSPACE_2` through `JUMP_TO_WORKSPACE_9`, 
    Replace with:
    ```tsx
    <span className="text-[10px] text-muted-foreground font-mono tabular-nums shrink-0">
-     {platform === "darwin" ? "⌘" : "Alt+"}{shortcutIndex + 1}
+     {platform === "darwin" ? "⌘" : "Ctrl+Shift+"}{shortcutIndex + 1}
    </span>
    ```
 
@@ -864,6 +839,6 @@ After applying all patches, verify:
 - [ ] Changes panel loads (no "Unable to load changes")
 - [ ] "Open in VS Code" works
 - [ ] Notification sounds and ringtone preview play correctly on Windows
-- [ ] Alt+1/2/3 switches workspaces on Windows (⌘+1/2/3 on macOS)
-- [ ] Sidebar tooltip shows "Alt+1" on Windows instead of "⌘1"
+- [ ] Ctrl+Shift+1/2/3 switches workspaces on Windows (⌘+1/2/3 on macOS)
+- [ ] Sidebar tooltip shows "Ctrl+Shift+1" on Windows instead of "⌘1"
 - [ ] NSIS installer builds successfully
