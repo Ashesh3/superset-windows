@@ -719,6 +719,83 @@ function normalizeTerminalCommand(command: string): string {
 
 ---
 
+## Patch 16: Fix sound playback on Windows (MP3 support)
+
+**Why:** The Windows sound implementation uses `System.Media.SoundPlayer` which **only supports WAV format**. All ringtones are MP3 files, so playback silently fails. The fix switches to `System.Windows.Media.MediaPlayer` (WPF/PresentationCore) which supports MP3. This affects both the notification sound and the ringtone preview.
+
+**File: `apps/desktop/src/main/lib/notification-sound.ts`**
+
+Find the Windows branch inside `playSoundFile`:
+```typescript
+} else if (process.platform === "win32") {
+  execFile("powershell", [
+    "-c",
+    `(New-Object Media.SoundPlayer '${soundPath}').PlaySync()`,
+  ]);
+}
+```
+
+Replace with:
+```typescript
+} else if (process.platform === "win32") {
+  // System.Media.SoundPlayer only supports WAV. Use WPF MediaPlayer for MP3 support.
+  const psScript = `
+Add-Type -AssemblyName PresentationCore
+$p = New-Object System.Windows.Media.MediaPlayer
+$p.Open([Uri]::new("${soundPath.replace(/\\/g, "/")}"))
+$p.Play()
+Start-Sleep -Milliseconds 100
+while ($p.Position -lt $p.NaturalDuration.TimeSpan) { Start-Sleep -Milliseconds 200 }
+$p.Close()
+`.trim();
+  execFile("powershell", ["-NoProfile", "-c", psScript]);
+}
+```
+
+**File: `apps/desktop/src/lib/trpc/routers/ringtone/index.ts`**
+
+Find the Windows branch inside `playSoundFile`:
+```typescript
+} else if (process.platform === "win32") {
+  currentSession.process = execFile(
+    "powershell",
+    ["-c", `(New-Object Media.SoundPlayer '${soundPath}').PlaySync()`],
+    () => {
+      if (currentSession?.id === sessionId) {
+        currentSession = null;
+      }
+    },
+  );
+}
+```
+
+Replace with:
+```typescript
+} else if (process.platform === "win32") {
+  // System.Media.SoundPlayer only supports WAV. Use WPF MediaPlayer for MP3 support.
+  const psScript = `
+Add-Type -AssemblyName PresentationCore
+$p = New-Object System.Windows.Media.MediaPlayer
+$p.Open([Uri]::new("${soundPath.replace(/\\/g, "/")}"))
+$p.Play()
+Start-Sleep -Milliseconds 100
+while ($p.Position -lt $p.NaturalDuration.TimeSpan) { Start-Sleep -Milliseconds 200 }
+$p.Close()
+`.trim();
+  currentSession.process = execFile(
+    "powershell",
+    ["-NoProfile", "-c", psScript],
+    () => {
+      if (currentSession?.id === sessionId) {
+        currentSession = null;
+      }
+    },
+  );
+}
+```
+
+---
+
 ## Verification Checklist
 
 After applying all patches, verify:
@@ -729,4 +806,5 @@ After applying all patches, verify:
 - [ ] Agent launch (click Claude/Codex) auto-executes the command (no manual Enter needed)
 - [ ] Changes panel loads (no "Unable to load changes")
 - [ ] "Open in VS Code" works
+- [ ] Notification sounds and ringtone preview play correctly on Windows
 - [ ] NSIS installer builds successfully
