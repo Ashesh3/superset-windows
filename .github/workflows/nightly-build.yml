@@ -78,7 +78,9 @@ jobs:
         shell: bash
         run: |
           PATCHES_CONTENT=$(cat ../PATCHES.md)
-          claude --dangerously-skip-permissions -p "You are inside a fresh clone of superset-sh/superset. Apply ALL the patches described below to the codebase. Read each target file before editing. Create new files where specified. Do not skip any patch.
+          claude --dangerously-skip-permissions --effort medium -p "IMPORTANT: Do NOT enter plan mode. Do NOT use EnterPlanMode. Apply all changes directly and immediately.
+
+          You are inside a fresh clone of superset-sh/superset. Apply ALL the patches described below to the codebase. Read each target file before editing. Create new files where specified. Do not skip any patch.
 
           $PATCHES_CONTENT"
 
