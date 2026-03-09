@@ -78,11 +78,22 @@ jobs:
         shell: bash
         run: |
           PATCHES_CONTENT=$(cat ../PATCHES.md)
-          claude --dangerously-skip-permissions --effort medium -p "IMPORTANT: Do NOT enter plan mode. Do NOT use EnterPlanMode. Apply all changes directly and immediately.
+          claude --dangerously-skip-permissions --effort medium --verbose \
+            --output-format stream-json --include-partial-messages \
+            -p "IMPORTANT: Do NOT enter plan mode. Do NOT use EnterPlanMode. Apply all changes directly and immediately.
 
           You are inside a fresh clone of superset-sh/superset. Apply ALL the patches described below to the codebase. Read each target file before editing. Create new files where specified. Do not skip any patch.
 
-          $PATCHES_CONTENT"
+          $PATCHES_CONTENT" 2>&1 | jq -rj '
+            if .type == "stream_event" then
+              if .event.delta.type? == "text_delta" then .event.delta.text
+              elif .event.type? == "tool_use" then "\n🔧 " + (.event.name // "tool") + ": " + ((.event.input // {}) | tostring) + "\n"
+              elif .event.type? == "tool_result" then ""
+              else empty
+              end
+            else empty
+            end
+          '
 
       - name: Install dependencies
         working-directory: superset
