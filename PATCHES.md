@@ -871,7 +871,8 @@ if (
 
 // Windows: Ctrl+V pastes from clipboard.
 // xterm.js defaults to sending \x16 for Ctrl+V (Unix "quoted insert").
-// Intercept it and write clipboard text to the PTY instead.
+// Return false to block \x16 — the browser will fire a native paste event
+// which setupPasteHandler() already handles (with chunking, bracketed paste, etc.).
 if (
   isWindows &&
   event.type === "keydown" &&
@@ -880,12 +881,7 @@ if (
   !event.altKey &&
   event.key === "v"
 ) {
-  navigator.clipboard.readText().then((text) => {
-    if (text && options.onWrite) {
-      options.onWrite(text.replace(/\r?\n/g, "\r"));
-    }
-  });
-  return false; // Don't send \x16 to terminal
+  return false; // Block \x16; native paste event handles the rest
 }
 ```
 
