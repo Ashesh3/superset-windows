@@ -77,13 +77,10 @@ jobs:
           CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
         shell: bash
         run: |
-          PATCHES_CONTENT=$(cat ../PATCHES.md)
           claude --dangerously-skip-permissions --effort medium --verbose \
             -p "IMPORTANT: Do NOT enter plan mode. Do NOT use EnterPlanMode. Apply all changes directly and immediately.
 
-          You are inside a fresh clone of superset-sh/superset. Apply ALL the patches described below to the codebase. Read each target file before editing. Create new files where specified. Do not skip any patch.
-
-          $PATCHES_CONTENT"
+          You are inside a fresh clone of superset-sh/superset. Read the file ../PATCHES.md and apply ALL the patches described in it to this codebase. Read each target file before editing. Create new files where specified. Do not skip any patch."
 
       - name: Install dependencies
         working-directory: superset
