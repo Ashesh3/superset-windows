@@ -835,6 +835,75 @@ $p.Close()
 
 ---
 
+## Patch 18: Windows Ctrl+C (copy) and Ctrl+V (paste) in terminal
+
+**Why:** xterm.js is a terminal emulator, so it follows Unix terminal conventions:
+- **Ctrl+C** always sends SIGINT (interrupt) to the process, even when text is selected. On Windows, users expect Ctrl+C to copy selected text (and only interrupt when nothing is selected).
+- **Ctrl+V** sends the literal `\x16` character (ASCII SYN) to the terminal instead of pasting. On Windows, users expect Ctrl+V to paste from clipboard. (Ctrl+Shift+V works because xterm.js has built-in support for that as the "terminal paste" shortcut.)
+
+**File: `apps/desktop/src/renderer/screens/main/components/WorkspaceView/ContentView/TabsContent/Terminal/helpers.ts`**
+
+Find the `setupKeyboardHandler()` function. Inside the `handler` function, find the line:
+```typescript
+if (isTerminalReservedEvent(event)) return true;
+```
+
+**Immediately before** that line (after the Ctrl+Right word navigation block), add the following two blocks:
+
+```typescript
+// Windows: Ctrl+C copies selected text to clipboard; if nothing is
+// selected, fall through to send the normal interrupt signal.
+if (
+  isWindows &&
+  event.type === "keydown" &&
+  event.ctrlKey &&
+  !event.shiftKey &&
+  !event.altKey &&
+  event.key === "c"
+) {
+  if (xterm.hasSelection()) {
+    navigator.clipboard.writeText(xterm.getSelection());
+    xterm.clearSelection();
+    return false; // Copied — don't send interrupt
+  }
+  // No selection — fall through to terminal reserved handler (interrupt)
+}
+
+// Windows: Ctrl+V pastes from clipboard.
+// xterm.js defaults to sending \x16 for Ctrl+V (Unix "quoted insert").
+// Intercept it and write clipboard text to the PTY instead.
+if (
+  isWindows &&
+  event.type === "keydown" &&
+  event.ctrlKey &&
+  !event.shiftKey &&
+  !event.altKey &&
+  event.key === "v"
+) {
+  navigator.clipboard.readText().then((text) => {
+    if (text && options.onWrite) {
+      options.onWrite(text.replace(/\r?\n/g, "\r"));
+    }
+  });
+  return false; // Don't send \x16 to terminal
+}
+```
+
+The result should look like:
+```typescript
+    // ... Ctrl+Right word navigation block above ...
+
+    // Windows: Ctrl+C copies selected text ...
+    if (isWindows && ...) { ... }
+
+    // Windows: Ctrl+V pastes from clipboard ...
+    if (isWindows && ...) { ... }
+
+    if (isTerminalReservedEvent(event)) return true;
+```
+
+---
+
 ## Verification Checklist
 
 After applying all patches, verify:
@@ -848,4 +917,6 @@ After applying all patches, verify:
 - [ ] Notification sounds and ringtone preview play correctly on Windows
 - [ ] Ctrl+Shift+1/2/3 switches workspaces on Windows (⌘+1/2/3 on macOS)
 - [ ] Sidebar tooltip shows "Ctrl+Shift+1" on Windows instead of "⌘1"
+- [ ] Ctrl+C copies selected text in terminal, sends interrupt when nothing selected (Windows)
+- [ ] Ctrl+V pastes from clipboard in terminal (Windows)
 - [ ] NSIS installer builds successfully
