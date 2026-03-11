@@ -726,80 +726,152 @@ function normalizeTerminalCommand(command: string): string {
 
 ---
 
-## Patch 16: Fix sound playback on Windows (MP3 support)
+## Patch 16: Fix sound playback on Windows using Chromium audio engine
 
-**Why:** The Windows sound implementation uses `System.Media.SoundPlayer` which **only supports WAV format**. All ringtones are MP3 files, so playback silently fails. The fix switches to `System.Windows.Media.MediaPlayer` (WPF/PresentationCore) which supports MP3. This affects both the notification sound and the ringtone preview.
+**Why:** The original Windows sound implementation uses `System.Media.SoundPlayer` (WAV only) and PowerShell's `System.Windows.Media.MediaPlayer` (WPF) is unreliable on Windows 11 — the WPF audio session doesn't properly wake the audio endpoint from its sleep state, causing silent failures when no other audio is playing on the system. The fix plays audio through **Chromium's built-in audio engine** in the renderer process via `executeJavaScript`. This is the most reliable approach: Chromium's media pipeline properly initializes Windows audio sessions, requires zero external dependencies, and works consistently on Windows 10 and 11.
 
 **File: `apps/desktop/src/main/lib/notification-sound.ts`**
 
-Find the Windows branch inside `playSoundFile`:
-```typescript
-} else if (process.platform === "win32") {
-  execFile("powershell", [
-    "-c",
-    `(New-Object Media.SoundPlayer '${soundPath}').PlaySync()`,
-  ]);
-}
-```
+1. Add `readFileSync` to the existing `node:fs` import:
+   ```typescript
+   import { existsSync, readFileSync } from "node:fs";
+   ```
 
-Replace with:
-```typescript
-} else if (process.platform === "win32") {
-  // System.Media.SoundPlayer only supports WAV. Use WPF MediaPlayer for MP3 support.
-  const psScript = `
-Add-Type -AssemblyName PresentationCore
-$p = New-Object System.Windows.Media.MediaPlayer
-$p.Open([Uri]::new("${soundPath.replace(/\\/g, "/")}"))
-$p.Play()
-Start-Sleep -Milliseconds 100
-while ($p.Position -lt $p.NaturalDuration.TimeSpan) { Start-Sleep -Milliseconds 200 }
-$p.Close()
-`.trim();
-  execFile("powershell", ["-NoProfile", "-c", psScript]);
-}
-```
+2. Add `BrowserWindow` import from electron:
+   ```typescript
+   import { BrowserWindow } from "electron";
+   ```
+
+3. Find the Windows branch inside `playSoundFile`:
+   ```typescript
+   } else if (process.platform === "win32") {
+     execFile("powershell", [
+       "-c",
+       `(New-Object Media.SoundPlayer '${soundPath}').PlaySync()`,
+     ]);
+   }
+   ```
+
+   Replace with:
+   ```typescript
+   } else if (process.platform === "win32") {
+     // Play via Chromium's audio engine in the renderer for reliable playback.
+     // PowerShell-based approaches (WPF MediaPlayer, SoundPlayer) are unreliable
+     // on Windows 11 — the audio endpoint sleep state prevents initialization.
+     const windows = BrowserWindow.getAllWindows();
+     if (windows.length > 0 && windows[0].webContents) {
+       try {
+         const buf = readFileSync(soundPath);
+         const ext = soundPath.endsWith(".wav") ? "wav" : "mpeg";
+         const dataUrl = `data:audio/${ext};base64,${buf.toString("base64")}`;
+         windows[0].webContents.executeJavaScript(
+           `new Audio(${JSON.stringify(dataUrl)}).play().catch(()=>{})`,
+         ).catch(() => {});
+       } catch {}
+     }
+   }
+   ```
 
 **File: `apps/desktop/src/lib/trpc/routers/ringtone/index.ts`**
 
-Find the Windows branch inside `playSoundFile`:
-```typescript
-} else if (process.platform === "win32") {
-  currentSession.process = execFile(
-    "powershell",
-    ["-c", `(New-Object Media.SoundPlayer '${soundPath}').PlaySync()`],
-    () => {
-      if (currentSession?.id === sessionId) {
-        currentSession = null;
-      }
-    },
-  );
-}
-```
+1. Add `readFileSync` to the existing `node:fs` import:
+   ```typescript
+   import { existsSync, readFileSync } from "node:fs";
+   ```
 
-Replace with:
-```typescript
-} else if (process.platform === "win32") {
-  // System.Media.SoundPlayer only supports WAV. Use WPF MediaPlayer for MP3 support.
-  const psScript = `
-Add-Type -AssemblyName PresentationCore
-$p = New-Object System.Windows.Media.MediaPlayer
-$p.Open([Uri]::new("${soundPath.replace(/\\/g, "/")}"))
-$p.Play()
-Start-Sleep -Milliseconds 100
-while ($p.Position -lt $p.NaturalDuration.TimeSpan) { Start-Sleep -Milliseconds 200 }
-$p.Close()
-`.trim();
-  currentSession.process = execFile(
-    "powershell",
-    ["-NoProfile", "-c", psScript],
-    () => {
-      if (currentSession?.id === sessionId) {
-        currentSession = null;
-      }
-    },
-  );
-}
-```
+2. Change the `BrowserWindow` import from type-only to a value import. Find:
+   ```typescript
+   import type { BrowserWindow, OpenDialogOptions } from "electron";
+   import { dialog } from "electron";
+   ```
+   Replace with:
+   ```typescript
+   import type { OpenDialogOptions } from "electron";
+   import { BrowserWindow, dialog } from "electron";
+   ```
+
+3. In `stopCurrentSound()`, add Windows renderer audio cleanup. Find:
+   ```typescript
+   function stopCurrentSound(): void {
+     if (currentSession) {
+       if (currentSession.process) {
+         currentSession.process.kill("SIGKILL");
+       }
+       currentSession = null;
+     }
+   }
+   ```
+
+   Replace with:
+   ```typescript
+   function stopCurrentSound(): void {
+     if (currentSession) {
+       if (currentSession.process) {
+         currentSession.process.kill("SIGKILL");
+       }
+       // Stop any renderer-side audio on Windows
+       if (process.platform === "win32") {
+         const windows = BrowserWindow.getAllWindows();
+         if (windows.length > 0 && windows[0].webContents) {
+           windows[0].webContents.executeJavaScript(`
+             if (window.__supersetPreviewAudio) {
+               window.__supersetPreviewAudio.pause();
+               window.__supersetPreviewAudio = null;
+             }
+           `).catch(() => {});
+         }
+       }
+       currentSession = null;
+     }
+   }
+   ```
+
+4. Find the Windows branch inside `playSoundFile`:
+   ```typescript
+   } else if (process.platform === "win32") {
+     currentSession.process = execFile(
+       "powershell",
+       ["-c", `(New-Object Media.SoundPlayer '${soundPath}').PlaySync()`],
+       () => {
+         if (currentSession?.id === sessionId) {
+           currentSession = null;
+         }
+       },
+     );
+   }
+   ```
+
+   Replace with:
+   ```typescript
+   } else if (process.platform === "win32") {
+     // Play via Chromium's audio engine in the renderer for reliable playback.
+     const windows = BrowserWindow.getAllWindows();
+     if (windows.length > 0 && windows[0].webContents) {
+       try {
+         const buf = readFileSync(soundPath);
+         const ext = soundPath.endsWith(".wav") ? "wav" : "mpeg";
+         const dataUrl = `data:audio/${ext};base64,${buf.toString("base64")}`;
+         windows[0].webContents.executeJavaScript(`
+           (function() {
+             if (window.__supersetPreviewAudio) {
+               window.__supersetPreviewAudio.pause();
+               window.__supersetPreviewAudio = null;
+             }
+             const audio = new Audio(${JSON.stringify(dataUrl)});
+             window.__supersetPreviewAudio = audio;
+             audio.play().catch(() => {});
+             audio.onended = () => {
+               if (window.__supersetPreviewAudio === audio) {
+                 window.__supersetPreviewAudio = null;
+               }
+             };
+           })()
+         `).catch(() => {});
+       } catch {}
+     }
+     // No child process to track — session clears on stop or next play
+   }
+   ```
 
 ---
 
