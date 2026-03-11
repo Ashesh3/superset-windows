@@ -619,6 +619,23 @@ Find the `"build"` script. Add `--config electron-builder.ts` to the electron-bu
    - Helper functions: `resolveTerminalTarget`, `getWindowsProgramRoots`, `findExistingPath`, `buildWindowsExeCandidates`, `findJetBrainsExeInRoot`, `findJetBrainsToolboxExe`, `findJetBrainsExe`
    - A `getWindowsAppCommand` function that tries: full exe path → JetBrains resolution → CLI fallback
 
+   **IMPORTANT**: The `getWindowsProgramRoots` function MUST include `LOCALAPPDATA\Programs` as a search root. Most Windows apps (VS Code, Cursor, etc.) install per-user under `%LOCALAPPDATA%\Programs\`, NOT directly in `%LOCALAPPDATA%\`. The function should return:
+   ```typescript
+   function getWindowsProgramRoots(): string[] {
+     const roots: string[] = [];
+     const pf = process.env.ProgramFiles;
+     const pfx86 = process.env["ProgramFiles(x86)"];
+     const localAppData = process.env.LOCALAPPDATA;
+     if (pf) roots.push(pf);
+     if (pfx86) roots.push(pfx86);
+     if (localAppData) {
+       roots.push(nodePath.join(localAppData, "Programs")); // User installs (VS Code, Cursor, etc.)
+       roots.push(localAppData);
+     }
+     return roots;
+   }
+   ```
+
    Key Windows app configs:
    - **vscode**: cli `code`, exe `Code.exe`, install dir `Microsoft VS Code`
    - **cursor**: cli `cursor`, exe `Cursor.exe`, install dir `Cursor`
