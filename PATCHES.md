@@ -730,6 +730,17 @@ function normalizeTerminalCommand(command: string): string {
 
 **Why:** The original Windows sound implementation uses `System.Media.SoundPlayer` (WAV only) and PowerShell's `System.Windows.Media.MediaPlayer` (WPF) is unreliable on Windows 11 — the WPF audio session doesn't properly wake the audio endpoint from its sleep state, causing silent failures when no other audio is playing on the system. The fix plays audio through **Chromium's built-in audio engine** in the renderer process via `executeJavaScript`. This is the most reliable approach: Chromium's media pipeline properly initializes Windows audio sessions, requires zero external dependencies, and works consistently on Windows 10 and 11.
 
+**File: `apps/desktop/src/renderer/index.html`**
+
+The Content Security Policy blocks `data:` URLs for media (audio). Find the `<meta http-equiv="Content-Security-Policy"` tag. Add `media-src 'self' data:;` to the CSP content. Insert it before the `font-src` directive. For example, find:
+```
+img-src 'self' data: blob: https: http:; font-src 'self';
+```
+And add `media-src 'self' data:;` so it becomes:
+```
+img-src 'self' data: blob: https: http:; media-src 'self' data:; font-src 'self';
+```
+
 **File: `apps/desktop/src/main/lib/notification-sound.ts`**
 
 1. Add `readFileSync` to the existing `node:fs` import:
