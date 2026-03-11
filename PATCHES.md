@@ -900,6 +900,96 @@ The result should look like:
 
 ---
 
+## Patch 19: Fix quit confirmation dialog on Windows
+
+**Why:** On Windows, when the user closes the app (X button, Alt+F4, or taskbar close), the window closes immediately and THEN the quit confirmation dialog appears from the `before-quit` handler. By that point the window is already gone, so the dialog is useless. This happens because the event flow on Windows is: `window.close()` → window closes visually → `window-all-closed` → `app.quit()` → `before-quit`. The confirmation must happen at the BrowserWindow `close` event, BEFORE the window disappears.
+
+**File: `apps/desktop/src/main/windows/main.ts`**
+
+1. Add `dialog` to the electron import (it already imports `app`, `Notification`, `nativeTheme`):
+   ```typescript
+   import { app, dialog, Notification, nativeTheme } from "electron";
+   ```
+
+2. Add `settings` to the `@superset/local-db` import:
+   ```typescript
+   import { settings, workspaces, worktrees } from "@superset/local-db";
+   ```
+
+3. Add `DEFAULT_CONFIRM_ON_QUIT` to the `shared/constants` import:
+   ```typescript
+   import { DEFAULT_CONFIRM_ON_QUIT, NOTIFICATION_EVENTS, PLATFORM } from "shared/constants";
+   ```
+
+4. Find the `window.on("close", () => {` handler. Change the signature to receive the event parameter:
+   ```typescript
+   window.on("close", (event) => {
+   ```
+
+5. Add this block at the very top of the `close` handler, before the `saveWindowState` call:
+   ```typescript
+   // Windows: show quit confirmation BEFORE the window closes.
+   // The before-quit handler fires too late on Windows (window is already gone).
+   if (PLATFORM.IS_WINDOWS) {
+     let confirmOnQuit = DEFAULT_CONFIRM_ON_QUIT;
+     try {
+       const row = localDb.select().from(settings).get();
+       confirmOnQuit = row?.confirmOnQuit ?? DEFAULT_CONFIRM_ON_QUIT;
+     } catch {}
+
+     if (confirmOnQuit) {
+       event.preventDefault();
+       dialog
+         .showMessageBox(window, {
+           type: "question",
+           buttons: ["Quit", "Cancel"],
+           defaultId: 0,
+           cancelId: 1,
+           title: "Quit Superset",
+           message: "Are you sure you want to quit?",
+         })
+         .then(({ response }) => {
+           if (response === 0) {
+             window.destroy(); // Bypass close event to avoid loop
+           }
+         });
+       return;
+     }
+   }
+   ```
+
+   The handler should now look like:
+   ```typescript
+   window.on("close", (event) => {
+     // Windows: show quit confirmation BEFORE the window closes.
+     if (PLATFORM.IS_WINDOWS) {
+       // ... confirmation block above ...
+     }
+
+     // Save window state first, before any cleanup
+     const isMaximized = window.isMaximized();
+     // ... rest of existing cleanup code ...
+   });
+   ```
+
+**File: `apps/desktop/src/main/index.ts`**
+
+In the `app.on("before-quit", ...)` handler, skip the confirmation on Windows since it's now handled at the window `close` event level. Find:
+```typescript
+const shouldConfirm =
+  !skipConfirmation && !isDev && getConfirmOnQuitSetting();
+```
+
+Change to:
+```typescript
+const shouldConfirm =
+  !skipConfirmation && !isDev && !PLATFORM.IS_WINDOWS && getConfirmOnQuitSetting();
+```
+
+Make sure `PLATFORM` is imported from `shared/constants` in this file (check the existing imports and add if missing).
+
+---
+
 ## Verification Checklist
 
 After applying all patches, verify:
@@ -915,4 +1005,5 @@ After applying all patches, verify:
 - [ ] Sidebar tooltip shows "Ctrl+Shift+1" on Windows instead of "⌘1"
 - [ ] Ctrl+C copies selected text in terminal, sends interrupt when nothing selected (Windows)
 - [ ] Ctrl+V pastes from clipboard in terminal (Windows)
+- [ ] Quit confirmation dialog appears BEFORE window closes on Windows
 - [ ] NSIS installer builds successfully
