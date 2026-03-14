@@ -151,23 +151,11 @@ if (process.platform === "win32") {
 
 ---
 
-## Patch 3: Disable GPU hardware acceleration on Windows
+## Patch 3: (REMOVED — GPU hardware acceleration stays enabled on Windows)
 
-**Why:** Prevents black/blank screens caused by GPU driver incompatibilities with Chromium's compositor.
+**This patch has been intentionally removed.** The original black/blank screen issues on Windows were caused by CORS and protocol problems, which are fixed by Patch 2 (stripCrossOriginPlugin) and Patch 5 (custom protocol). Disabling GPU acceleration globally degrades UI performance — every scroll, animation, and CSS transform is forced to CPU rendering, making the app feel sluggish and increasing memory usage. Keep the upstream default (GPU enabled).
 
-**File: `apps/desktop/src/lib/electron-app/factories/app/setup.ts`**
-
-Find the line that disables hardware acceleration for Linux:
-```typescript
-PLATFORM.IS_LINUX && app.disableHardwareAcceleration();
-```
-
-Change it to also include Windows:
-```typescript
-// Disable GPU hardware acceleration on Linux and Windows to prevent black/blank
-// screens caused by GPU driver incompatibilities with Chromium's compositor.
-(PLATFORM.IS_LINUX || PLATFORM.IS_WINDOWS) && app.disableHardwareAcceleration();
-```
+**No changes needed.** Do NOT modify `apps/desktop/src/lib/electron-app/factories/app/setup.ts` for this patch.
 
 ---
 
