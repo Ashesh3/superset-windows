@@ -1092,7 +1092,7 @@ Make sure `PLATFORM` is imported from `shared/constants` in this file (check the
 
 ## Patch 20: Fix terminal rendering on initial open (Windows)
 
-**Why:** When a new terminal opens on Windows, the content appears garbled/overlapping — text renders on top of itself with wrong column/row calculations. Switching to another tab and back fixes it. The root cause is a renderer timing issue: `fitAddon.fit()` runs synchronously (line 291) with the DOM renderer, then the WebGL renderer loads asynchronously in a `requestAnimationFrame` (line 230). After the WebGL swap, the terminal dimensions may differ but no refit/refresh occurs. When the user switches tabs and returns, `runReattachRecovery()` fires which calls `fit()` + `refresh()` and fixes everything. The fix: trigger the same refit+refresh after the WebGL renderer loads.
+**Why:** When a new terminal opens on Windows, the content appears garbled/overlapping — text renders on top of itself with wrong column/row calculations. Programs that use alternate screen mode (like Claude Code, vim, less) show old content underneath instead of a clean screen. Switching to another tab and back fixes it because `runReattachRecovery()` fires which calls `clearTextureAtlas()` + `fit()` + `refresh()`. The root cause is that after the WebGL renderer loads asynchronously and swaps from the DOM renderer, no recovery is performed. The fix: trigger the same recovery sequence that tab-switching does, after the WebGL renderer loads.
 
 **File: `apps/desktop/src/renderer/screens/main/components/WorkspaceView/ContentView/TabsContent/Terminal/helpers.ts`**
 
@@ -1111,8 +1111,12 @@ rafId = requestAnimationFrame(() => {
   rafId = null;
   if (isDisposed) return;
   rendererRef.current = loadRenderer(xterm);
-  // Refit after renderer swap — the WebGL renderer may have different
-  // metrics than the initial DOM renderer, causing garbled text on Windows.
+  // Run the same recovery that tab-switching triggers (runReattachRecovery):
+  // clear stale WebGL glyph cache, refit dimensions, and force a full repaint.
+  // Without this, the terminal shows garbled/overlapping text on Windows because
+  // the WebGL renderer has different metrics than the initial DOM renderer, and
+  // alternate screen mode transitions (Claude Code, vim) don't render cleanly.
+  rendererRef.current.clearTextureAtlas?.();
   fitAddon.fit();
   xterm.refresh(0, xterm.rows - 1);
 });
