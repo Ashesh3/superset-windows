@@ -14,7 +14,33 @@ bun run copy:native-modules
 CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --win --publish never --config electron-builder.ts
 ```
 
-The installer will be at `apps/desktop/release/Superset-<version>-x64.exe`.
+### Current validated Windows 1.8.9+ state
+
+The current known-good Windows path is **V2 mode**. V2 terminals use Windows
+named pipes, skip Unix fd handoff, open in PowerShell 7 when available, honor
+the configured worktree base directory, auto-execute Claude/Codex preset
+commands, and let "Open in VS Code" resolve normal per-user Windows installs
+without waiting for `Code.exe` to exit. V2 workspace tab switching no longer
+freezes or flashes a `cmd.exe` window. Repo-local project config directories
+remain named `.superset`. The resource monitor remains enabled; retesting
+showed it was not the remaining V2 freeze cause after the terminal/workspace
+fixes.
+
+V1 terminal connectivity works after the earlier terminal-host patches, but V1
+can still freeze when switching workspaces on Windows. Prefer V2 on Windows
+unless specifically investigating V1.
+
+Before packaging Superset 1.8.9+ on Windows, also apply the build notes in
+Patch 29: use a Windows-compatible Bun version, enable Git long paths, rebuild
+`better-sqlite3` for the target Electron ABI, and avoid broad native-module
+rebuilds that can fail on unrelated optional modules. Patches 33 and 34 capture
+later V2 refinements for reused branch names and custom agent launch commands.
+Patches 35, 36, and 37 capture later Windows cleanup and UX fixes:
+best-effort removal of leftover deleted worktree folders, working ringtone
+preview playback from Settings, and deriving the branch slug from the typed
+workspace name when no prompt/branch is supplied. Patch 38 hardens Windows
+shell selection so V2 terminals do not silently fall back to legacy Windows
+PowerShell.
 
 ---
 
@@ -599,13 +625,16 @@ Find the `"build"` script. Add `--config electron-builder.ts` to the electron-bu
 
 **File: `apps/desktop/src/lib/trpc/routers/external/helpers.ts`**
 
-1. Add `import fs from "node:fs";` at the top (alongside existing imports).
+1. Add the filesystem imports needed for Windows app discovery at the top (alongside existing imports):
+   ```typescript
+   import { existsSync, readdirSync, statSync } from "node:fs";
+   ```
 
 2. After the `LINUX_CLI_CANDIDATES` object, add the entire Windows app resolution system. This includes:
    - A `WindowsAppConfig` type
-   - A `WINDOWS_APP_CONFIG` record mapping every `ExternalApp` to Windows executable info (cli name, exe names, install directories, JetBrains exe names, custom args)
-   - Helper functions: `resolveTerminalTarget`, `getWindowsProgramRoots`, `findExistingPath`, `buildWindowsExeCandidates`, `findJetBrainsExeInRoot`, `findJetBrainsToolboxExe`, `findJetBrainsExe`
-   - A `getWindowsAppCommand` function that tries: full exe path → JetBrains resolution → CLI fallback
+   - A `WINDOWS_APP_CONFIG` record mapping every `ExternalApp` to Windows launcher info (cli name, direct CLI script paths such as `bin\\code.cmd`, GUI exe names, install directories, JetBrains exe names, custom args)
+   - Helper functions: `resolveTerminalTarget`, `getWindowsProgramRoots`, `buildWindowsCommandCandidates`, `buildWindowsExeCandidates`, `findJetBrainsExe`, and any additional JetBrains Toolbox helpers you need
+   - A `getWindowsAppCommand` function that tries: full CLI script path / GUI exe path / JetBrains resolution, then CLI fallback
 
    **IMPORTANT**: The `getWindowsProgramRoots` function MUST include `LOCALAPPDATA\Programs` as a search root. Most Windows apps (VS Code, Cursor, etc.) install per-user under `%LOCALAPPDATA%\Programs\`, NOT directly in `%LOCALAPPDATA%\`. The function should return:
    ```typescript
@@ -625,11 +654,14 @@ Find the `"build"` script. Add `--config electron-builder.ts` to the electron-bu
    ```
 
    Key Windows app configs:
-   - **vscode**: cli `code`, exe `Code.exe`, install dir `Microsoft VS Code`
+   - **vscode**: try `bin\\code.cmd` first, then `Code.exe`, then CLI `code`; install dir `Microsoft VS Code`
    - **cursor**: cli `cursor`, exe `Cursor.exe`, install dir `Cursor`
    - **terminal**: cli `wt`, exe `wt.exe`/`WindowsTerminal.exe`, args `["-d", targetDir]`
    - **JetBrains IDEs**: search `Program Files/JetBrains/<product>/bin/<exe>` and Toolbox paths
    - **macOS-only apps** (xcode, iterm, appcode): empty config `{}`
+   - Keep the CLI fallback after discovered exe paths, so systems with `code` on
+     `PATH` still work, but normal per-user VS Code installs under
+     `%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe` do not require it.
 
 3. In `getAppCommand()`, add a `win32` check at the top before the `darwin` check:
    ```typescript
@@ -637,6 +669,21 @@ Find the `"build"` script. Add `--config electron-builder.ts` to the electron-bu
      return getWindowsAppCommand(app, targetPath);
    }
    ```
+
+4. In `spawnAsync`, pass `windowsHide: true` in the spawn options so fallback
+   CLI launches do not show transient console windows on Windows. Also teach
+   it how to launch full-path Windows `.cmd`/`.bat` shims (for example
+   `%LOCALAPPDATA%\\Programs\\Microsoft VS Code\\bin\\code.cmd`) via
+   `cmd.exe`/`shell: true`; a direct `spawn("...\\code.cmd")` can fail with
+   `EINVAL` on Windows even when the file exists.
+
+5. When `getWindowsAppCommand()` returns discovered GUI executable paths
+   (`Code.exe`, `Cursor.exe`, JetBrains `*.exe`, etc.), tag those candidates
+   with `waitForExit: false`. Keep CLI-style candidates (`code.cmd`, `code`,
+   `cursor`, etc.) exit-checked. In `openPathInApp()`, pass this flag through
+   to `spawnAsync`. `spawnAsync` should resolve on the child `spawn` event and
+   `unref()` for `waitForExit: false`; otherwise the Open button can remain
+   pending until VS Code/Cursor exits even though the editor has launched.
 
 ---
 
@@ -707,6 +754,14 @@ Find the `"build"` script. Add `--config electron-builder.ts` to the electron-bu
 
 **Why:** Windows ConPTY expects `\r` (carriage return) to trigger command execution, not `\n` (linefeed). Without this, agent launch commands are typed into the terminal but not executed — the user has to manually press Enter.
 
+**Files:**
+- `apps/desktop/src/renderer/lib/terminal/launch-command.ts`
+- `packages/host-service/src/terminal/terminal.ts`
+
+V1 and some renderer-driven command launches go through
+`launch-command.ts`. V2 preset launches go through host-service
+`initialCommand` queuing, so both surfaces must use `\r` on Windows.
+
 **File: `apps/desktop/src/renderer/lib/terminal/launch-command.ts`**
 
 Find the `normalizeTerminalCommand` function:
@@ -728,6 +783,34 @@ function normalizeTerminalCommand(command: string): string {
     : `${command}${eol}`;
 }
 ```
+
+**File: `packages/host-service/src/terminal/terminal.ts`**
+
+1. Add a platform-specific Enter sequence near the terminal constants:
+
+```typescript
+const TERMINAL_COMMAND_EOL = process.platform === "win32" ? "\r" : "\n";
+```
+
+2. In `queueInitialCommand`, replace the `\n`-only append logic:
+
+```typescript
+const cmd = initialCommand.endsWith("\n")
+  ? initialCommand
+  : `${initialCommand}\n`;
+```
+
+with:
+
+```typescript
+const cmd = /[\r\n]$/.test(initialCommand)
+  ? initialCommand
+  : `${initialCommand}${TERMINAL_COMMAND_EOL}`;
+```
+
+Without this host-service change, V2 presets such as Claude open a terminal
+with the command typed but do not execute it until the user manually presses
+Enter.
 
 ---
 
@@ -1112,17 +1195,834 @@ rafId = requestAnimationFrame(() => {
 
 ---
 
+## Patch 21: Skip native build of macos-process-metrics on non-Darwin
+
+**Why:** `packages/macos-process-metrics` ships an `install` script of the form `node-gyp rebuild || echo 'Native build skipped'`. The intent is to fall back gracefully on non-macOS, but on Windows with VS Build Tools installed, `node-gyp` invokes MSBuild on the macOS-only `.vcxproj`. MSBuild then **hangs indefinitely** (rather than failing fast) trying to compile Objective-C/Cocoa source against Windows toolchains, blocking the entire `bun install`. The `||` fallback never fires because the parent process is stuck waiting on a child that never exits.
+
+The fix short-circuits the script with a platform check before `node-gyp` is invoked.
+
+**File: `packages/macos-process-metrics/package.json`**
+
+Find the `"install"` script:
+```json
+"install": "node-gyp rebuild || echo 'Native build skipped (non-macOS or missing toolchain)'"
+```
+
+Replace with:
+```json
+"install": "node -e \"if(process.platform!=='darwin'){console.log('Skipping native build on '+process.platform);process.exit(0)}\" && node-gyp rebuild || echo 'Native build skipped (non-macOS or missing toolchain)'"
+```
+
+The leading `node -e` exits 0 on Windows/Linux before MSBuild is ever spawned. On macOS the script behavior is unchanged (the `node -e` is a no-op and `node-gyp rebuild` runs as before).
+
+---
+
+## Patch 22: Dereference symlinks when materializing native modules
+
+**Why:** Bun's isolated install creates junctions (Windows) and symlinks (Unix) for every package, **including transitive ones**. When `copy-native-modules.ts` materializes `@superset/macos-process-metrics`, the package contains a nested `node_modules/node-addon-api` junction pointing back into the Bun store. The default `cpSync({ recursive: true })` tries to recreate that junction at the destination via `copyfile`, which on Windows raises `EPERM: operation not permitted` (creating a junction that points outside the destination tree requires elevated privileges or developer mode, and even then is fragile).
+
+Setting `dereference: true` makes `cpSync` follow the link and copy the target's contents instead, which always succeeds and is what we actually want for an asar-packaged app: real files, no dangling links.
+
+**File: `apps/desktop/scripts/copy-native-modules.ts`**
+
+In `copyModuleIfSymlink` (around the line that calls `cpSync` after removing the symlink), change:
+```typescript
+// Copy the actual files
+cpSync(realPath, modulePath, { recursive: true });
+```
+
+to:
+```typescript
+// Copy the actual files. dereference: true follows nested symlinks
+// (e.g., node_modules/node-addon-api junctions on Windows) and copies
+// their contents instead of the link itself, which avoids EPERM on
+// copyfile when the destination cannot create the same junction.
+cpSync(realPath, modulePath, { recursive: true, dereference: true });
+```
+
+---
+
+## Patch 23: Force better-sqlite3 rebuild against target Electron ABI
+
+**Why:** Electron 40.x ships Node ABI `NODE_MODULE_VERSION 143`, but Bun's store contains a `better-sqlite3` `.node` binary built against an older ABI (e.g. 141). At runtime the installed app crashes on first launch with:
+
+```
+Error: The module '...\better_sqlite3.node' was compiled against a different
+Node.js version using NODE_MODULE_VERSION 141. This version of Node.js requires
+NODE_MODULE_VERSION 143.
+```
+
+The postinstall script does call `electron-builder install-app-deps` (which delegates to `@electron/rebuild`), but that command tries to rebuild **every** native module in the tree — including upstream `node-pty@1.1.0`, which fails to compile on Windows runners that don't have the "MSVC v143 Spectre-mitigated libs" component installed (`error MSB8040`). When the rebuild step aborts mid-way, `better-sqlite3` is left with whatever stale ABI was in the Bun store, and the asar packager copies that broken binary into the installer.
+
+We don't actually use upstream `node-pty` — Patch 10 swaps it for `@lydell/node-pty` which ships prebuilds — so its rebuild failure is irrelevant to runtime. The fix is to explicitly rebuild only `better-sqlite3` against the target Electron version after `bun install`, before `copy:native-modules`. This makes the build deterministic regardless of which optional MSVC components are installed on the runner.
+
+**No source file changes.** This is enforced by the build pipeline: the nightly workflow runs an explicit `electron-rebuild -w better-sqlite3 --only better-sqlite3` step. When building locally, run the same command from `apps/desktop` after `bun install`:
+
+```powershell
+cd apps\desktop
+$ELECTRON_VERSION = (Get-Content package.json | ConvertFrom-Json).devDependencies.electron
+node ..\..\node_modules\.bun\@electron+rebuild@*\node_modules\@electron\rebuild\lib\cli.js `
+  -v $ELECTRON_VERSION -w better-sqlite3 --only better-sqlite3
+bun run copy:native-modules
+```
+
+---
+
+## Patch 24: Disable GitHub `gh` polling and hide cmd window flash on Windows
+
+**Files:**
+- `apps/desktop/src/renderer/lib/githubQueryPolicy/githubQueryPolicy.ts`
+- `apps/desktop/src/lib/trpc/routers/workspaces/utils/shell-env.ts`
+- `apps/desktop/src/lib/trpc/routers/workspaces/utils/git-client.ts`
+
+**Why:** On Windows, every `gh` (and `git`) invocation goes through Node's
+`child_process.execFile`, which by default does **not** pass `windowsHide:
+true`. Each spawn flashes a `cmd.exe` console window for ~1–2s and stalls
+the Electron main process briefly while the (Go-based) `gh` binary
+initializes — a problem amplified by Defender / corporate AV scanning the
+binary on every launch. The renderer polls `gh` every 10s for PR status
+and 30s for PR comments, and re-fetches on focus and on workspace mount.
+The result: clicking a workspace tab consistently freezes the UI for a
+beat and pops a black console window before snapping back.
+
+**Fix:**
+
+1. In `githubQueryPolicy.ts`, force both policy helpers to return
+   `enabled: false`, `refetchInterval: false`, `refetchOnWindowFocus: false`
+   so React Query never spawns `gh` automatically. Replace the bodies of
+   `getGitHubStatusQueryPolicy` and `getGitHubPRCommentsQueryPolicy` with
+   a constant disabled policy. Keep the existing `staleTime` constants for
+   type compatibility with callers.
+
+2. In `shell-env.ts` (`execWithShellEnv`), add `windowsHide: true` to **both**
+   `execFileAsync(cmd, args, { … })` calls (the initial call and the
+   PATH-retry path).
+
+3. In `git-client.ts` (`execGitWithShellPath`), add `windowsHide: true` to
+   the `execFileAsync("git", args, { … })` call.
+
+These two fixes are layered on purpose: (1) eliminates the recurring
+freezes on tab switch / focus / interval, (2) ensures any remaining
+explicit `gh`/`git` invocations (PR create, merge, repo-context refresh,
+etc.) don't pop a console window.
+
+> **Note:** The matching test file
+> `apps/desktop/src/renderer/lib/githubQueryPolicy/githubQueryPolicy.test.ts`
+> asserts the old polling behavior. It is acceptable for these tests to
+> fail after this patch — they are not run by the Windows build pipeline
+> (`bun run compile:app` + `electron-builder`). Do not re-enable polling
+> to make them pass.
+
+---
+
+## Patch 25: (REMOVED — keep resource metrics enabled on Windows)
+
+**File:** `apps/desktop/src/main/lib/resource-metrics/index.ts`
+
+This patch has been intentionally removed from the current 1.8.9 Windows
+working state. The TopBar `ResourceConsumption` widget polls
+`resourceMetrics.getSnapshot` every 15s (idle) / 2s (open). On Windows the
+implementation in `process-tree.ts` shells out to
+`powershell -NoProfile -Command "Get-CimInstance Win32_Process …"` via
+`child_process.exec` (which uses `cmd.exe`), and `pidusage` uses `wmic` the
+same way. This was suspected as a freeze source, so an earlier attempt
+short-circuited `collectResourceMetrics` on Windows and returned empty
+snapshots.
+
+Retesting after the V2 terminal/workspace fixes showed the freeze does **not**
+return when resource metrics are enabled. Patch 26's global `windowsHide: true`
+child-process wrapper prevents console-window flashes from these shell-outs, so
+the monitor can stay functional.
+
+**No changes needed.** Do not add a Windows early return to
+`collectResourceMetrics`.
+
+---
+
+## Patch 26: Force `windowsHide: true` for all child_process spawns on Windows
+
+**Files:**
+- `apps/desktop/src/main/lib/windows-child-process-patch.ts` (new)
+- `apps/desktop/src/main/index.ts`
+
+**Why:** Many third-party libraries — `pidusage` (uses `wmic`),
+`@sentry/electron`'s `additional-context` integration (`powershell
+Get-CimInstance Win32_ComputerSystem`), and ad-hoc `exec` calls in our
+own code — invoke `child_process.{exec,spawn,execFile,…}` without
+passing `windowsHide: true`. On Windows this flashes a `cmd.exe` /
+console window for every console-subsystem child. Patching them
+individually is whack-a-mole. We can't simply set `windowsHide: true`
+globally via Node options; it's a per-call argument.
+
+**Fix:** Monkey-patch `node:child_process` at the very start of the
+main-process entry point so every spawn variant defaults to
+`windowsHide: true` on Windows. Callers that explicitly pass
+`windowsHide: false` are still respected.
+
+The new `windows-child-process-patch.ts` exports
+`installWindowsChildProcessPatch()`, which wraps the six spawn variants
+(`spawn`, `exec`, `execFile`, `spawnSync`, `execSync`, `execFileSync`).
+It also includes a tracer (enabled in dev or with
+`SUPERSET_TRACE_SPAWN=1`) that logs every command spawned, so future
+Windows-specific freezes can be attributed to a specific subprocess.
+
+Wire it up in `apps/desktop/src/main/index.ts` immediately after the
+import block — before any code path that may spawn (Sentry init,
+terminal host, agent setup, auto-updater, etc.):
+
+```ts
+import { installWindowsChildProcessPatch } from "./lib/windows-child-process-patch";
+installWindowsChildProcessPatch();
+```
+
+This is a defense-in-depth measure on top of the targeted fixes in
+Patches 24 and 25; together they should eliminate the
+console-window flash on workspace tab switches and any other UI flow
+that ends up spawning a Windows console-subsystem child.
+
+**1.8.9 validation note:** these V1 freeze mitigations reduced
+console-window flashes and fixed V1 terminal connectivity after Patch 8, but
+V1 can still freeze when switching workspaces on Windows. The validated path
+for 1.8.9 is V2 mode after applying the V2 fixes in Patches 27, 28,
+30, and 31, plus the Windows launcher/preset fixes in Patches 13 and 15:
+terminals work, presets auto-execute, PowerShell 7 is selected when available,
+configured worktree roots are honored, "Open in VS Code" works, and workspace
+switching no longer freezes.
+
+---
+
+## Patch 27: Use Windows named pipes for the V2 `pty-daemon`
+
+**Files:**
+- `packages/host-service/src/daemon/DaemonSupervisor.ts`
+- `packages/pty-daemon/src/Server/Server.ts`
+
+**Why:** V2 terminal mode does **not** use the desktop `terminal-host`
+daemon from Patch 8. It uses `@superset/pty-daemon`, supervised by
+`packages/host-service`. On Windows, the upstream supervisor still tries
+to bind a Unix-style socket file in `%TEMP%`, for example:
+
+```text
+C:\Users\...\AppData\Local\Temp\superset-ptyd-4466e4457bc5.sock
+```
+
+This fails at runtime with:
+
+```text
+[pty-daemon] failed to start: Error: listen EACCES: permission denied ...\superset-ptyd-....sock
+```
+
+The fix is the same principle as Patch 8: use a named pipe on Windows and
+skip Unix-only file cleanup/permission operations in the daemon.
+
+**File: `packages/host-service/src/daemon/DaemonSupervisor.ts`**
+
+1. Add a platform constant near the other module constants:
+
+```ts
+const IS_WINDOWS = process.platform === "win32";
+```
+
+2. Update `ptyDaemonSocketPath(organizationId)` so Windows returns a named
+   pipe instead of a temp `.sock` path:
+
+```ts
+function ptyDaemonSocketPath(organizationId: string): string {
+  const shortId = createHash("sha256")
+    .update(organizationId)
+    .digest("hex")
+    .slice(0, 12);
+  if (IS_WINDOWS) return `\\\\.\\pipe\\superset-ptyd-${shortId}`;
+  return path.join(os.tmpdir(), `superset-ptyd-${shortId}.sock`);
+}
+```
+
+3. In `waitForSocket`, do not gate connect attempts on
+   `fs.existsSync(socketPath)` on Windows. Named pipes are not normal
+   filesystem entries:
+
+```ts
+if (IS_WINDOWS || fs.existsSync(socketPath)) {
+  if (await isSocketConnectable(socketPath, 200)) return true;
+}
+```
+
+`net.createConnection({ path: socketPath })` works for both Unix sockets
+and Windows named pipes, so `DaemonClient`, `probeDaemonVersion`, and
+`isSocketConnectable` can keep using the same connect call.
+
+**File: `packages/pty-daemon/src/Server/Server.ts`**
+
+1. Add a platform constant near imports:
+
+```ts
+const IS_WINDOWS = process.platform === "win32";
+```
+
+2. In `listen()`, wrap directory creation, stale socket `unlinkSync`, and
+   `chmodSync` with `if (!IS_WINDOWS)`. The Windows named pipe is created
+   by `server.listen(pipeName)` and must not be treated as a file path.
+
+3. In `close()`, only unlink `this.opts.socketPath` on non-Windows:
+
+```ts
+if (!IS_WINDOWS) {
+  try {
+    fs.unlinkSync(this.opts.socketPath);
+  } catch {
+    // ignore
+  }
+}
+```
+
+After this patch, V2 terminal settings should show the daemon as running
+instead of "daemon unavailable".
+
+---
+
+## Patch 28: Disable Unix fd-handoff assumptions for V2 terminals on Windows
+
+**Files:**
+- `packages/pty-daemon/src/Pty/Pty.ts`
+- `packages/pty-daemon/src/Server/Server.ts`
+- `packages/host-service/src/daemon/DaemonSupervisor.ts`
+
+**Why:** Once Patch 27 lets the V2 daemon start, opening a V2 terminal on
+Windows can fail with:
+
+```text
+node-pty master fd unavailable (got number: -1). Phase 2 fd-handoff depends
+on node-pty's private _fd property
+```
+
+On Unix, `node-pty` exposes a real PTY master file descriptor and the V2
+daemon's hot-upgrade path can pass that fd to a successor process. On
+Windows, `node-pty` is backed by ConPTY handles, not a Unix fd, so `_fd`
+is `-1`. That does **not** mean normal terminal spawn is broken; it only
+means the Unix fd-handoff upgrade feature is unavailable on Windows.
+
+**File: `packages/pty-daemon/src/Pty/Pty.ts`**
+
+1. Add a platform capability constant:
+
+```ts
+const SUPPORTS_FD_HANDOFF = process.platform !== "win32";
+```
+
+2. Keep `getMasterFd()` strict for platforms that support fd handoff, but
+   do not validate it during normal Windows spawn. In `spawn()`, change:
+
+```ts
+const adapter = new NodePtyAdapter(term, meta);
+adapter.getMasterFd();
+return adapter;
+```
+
+to:
+
+```ts
+const adapter = new NodePtyAdapter(term, meta);
+if (SUPPORTS_FD_HANDOFF) adapter.getMasterFd();
+return adapter;
+```
+
+This allows normal V2 terminal sessions and presets (Claude/Codex) to open
+on Windows while preserving the early assertion on Unix.
+
+**File: `packages/pty-daemon/src/Server/Server.ts`**
+
+In `prepareUpgrade()`, return an explicit unsupported result on Windows
+before enumerating live sessions and calling `getMasterFd()`:
+
+```ts
+if (IS_WINDOWS) {
+  return {
+    ok: false,
+    reason:
+      "fd-handoff daemon upgrade is not supported on Windows; use restart instead",
+  };
+}
+```
+
+**File: `packages/host-service/src/daemon/DaemonSupervisor.ts`**
+
+Add the same Windows guard to `runUpdate()` so the UI's daemon update path
+does not attempt fd-handoff on Windows:
+
+```ts
+if (IS_WINDOWS) {
+  return {
+    ok: false,
+    reason:
+      "fd-handoff daemon update is not supported on Windows; use restart instead",
+  };
+}
+```
+
+The intended Windows behavior is: daemon restart works, normal terminals
+work, and hot daemon binary handoff is disabled until a Windows ConPTY
+handle-transfer implementation exists.
+
+---
+
+## Patch 29: Current Windows build notes for Superset 1.8.9+
+
+These lessons came from a validated 1.8.9 Windows rebuild and should be
+checked when applying the older patches above to newer upstream Superset
+versions:
+
+- **Use V2 mode on Windows:** a validated 1.8.9 build confirmed V2 as the
+  working Windows path. V2 terminals work after Patches 27 and 28, presets
+  auto-execute after Patch 15, PowerShell 7 is preferred after Patch 30,
+  configured worktree roots are honored after Patch 31, and the workspace
+  tab-switch freeze is gone there. Patch 13 is also required for reliable
+  Windows "Open in VS Code" behavior. V1 terminal connectivity works after
+  Patch 8, but V1 may still freeze on workspace switches.
+- **Bun:** Bun 1.3.11 can segfault on Windows. Upgrade Bun before install.
+  Stable Bun 1.3.13 worked for the 1.8.9 build; canary may also work, but
+  verify `bun install` after switching.
+- **Long paths:** always run `git config core.longpaths true` before
+  cloning/installing. Bun's isolated linker creates very deep paths.
+- **node-pty:** upstream `node-pty@1.1.0` already ships Windows prebuilds in
+  current Superset. Do **not** blindly apply the older `@lydell/node-pty`
+  swap if current upstream is already on `node-pty@1.1.0` and packaging
+  includes the native prebuilds.
+- **better-sqlite3:** rebuild it against the target Electron version after
+  native modules are materialized. For Electron 40.8.5:
+
+  ```powershell
+  node node_modules\.bun\@electron+rebuild@4.0.3\node_modules\@electron\rebuild\lib\cli.js `
+    --version 40.8.5 --module-dir apps\desktop --only better-sqlite3 --force
+  ```
+
+- **electron-builder rebuilds:** on Windows, set
+  `npmRebuild: process.platform !== "win32"` in `electron-builder.ts` after
+  doing the targeted `better-sqlite3` rebuild. Letting electron-builder
+  rebuild everything can fail on `node-pty` if the machine lacks the MSVC
+  Spectre libraries, even though runtime prebuilds are present.
+- **copy-native-modules:** use both `rmSync(path, { recursive: true, force:
+  true })` for Windows junction removal and `cpSync(..., { recursive: true,
+  dereference: true })` for nested Bun store junctions.
+- **blockmaps:** disable NSIS differential/blockmap generation for local
+  Windows attempts if blockmap signing/packaging is noisy:
+
+  ```ts
+  nsis: {
+    differentialPackage: false,
+  }
+  ```
+
+---
+
+## Patch 30: Prefer PowerShell 7 for V2 terminals on Windows
+
+**Why:** V2 terminals defaulted to `COMSPEC`, which normally points at
+`cmd.exe`. Users could only force PowerShell by launching the app through a
+shortcut that rewrote `ComSpec`. Resolve the terminal shell directly instead:
+prefer an explicit `SUPERSET_TERMINAL_SHELL`, then `pwsh.exe`, then Windows
+PowerShell, and only fall back to `COMSPEC`/`cmd.exe` if PowerShell is not
+available.
+
+**File: `packages/host-service/src/terminal/shell-launch.ts`**
+
+1. Keep the existing POSIX behavior unchanged.
+
+2. Add Windows shell resolution helpers near the top of the file:
+   - Read `SUPERSET_TERMINAL_SHELL` as an override.
+   - Read Windows environment keys case-insensitively (`PATH` vs `Path`,
+     `SystemRoot` vs `SYSTEMROOT`, etc.) because GUI-launched Electron/Node
+     snapshots can differ from an interactive shell.
+   - Search known real PowerShell install paths before `PATH` aliases,
+     including `%ProgramFiles%\PowerShell\7\pwsh.exe`,
+     `%ProgramFiles%\PowerShell\7-preview\pwsh.exe`, packaged Store installs
+     under `%ProgramFiles%\WindowsApps\Microsoft.PowerShell_*__8wekyb3d8bbwe\pwsh.exe`,
+     and
+     `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`.
+   - If direct `%ProgramFiles%\WindowsApps` enumeration fails with `EPERM`,
+     resolve Store PowerShell with:
+     ```powershell
+     Get-AppxPackage Microsoft.PowerShell |
+       Sort-Object Version -Descending |
+       ForEach-Object { Join-Path $_.InstallLocation 'pwsh.exe' }
+     ```
+   - Search `PATH`/`Path` using Windows `PATHEXT`-style extensions.
+   - Treat `%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe` as a last-resort
+     app execution alias, not the preferred executable. Windows Terminal's
+     PowerShell Core profile resolves to the real packaged `pwsh.exe`, not
+     this alias.
+
+3. Change `resolveLaunchShell()` so the Windows branch returns the resolved
+   PowerShell path instead of `baseEnv.COMSPEC || "cmd.exe"`.
+
+The intended Windows behavior is that a normal new V2 terminal opens in
+PowerShell 7 (`pwsh`) when available. If someone wants a different shell, they
+can set `SUPERSET_TERMINAL_SHELL` before launching the app.
+
+---
+
+## Patch 31: Honor configured worktree base dir in V2 host-service
+
+**Why:** V2 workspace creation runs in `packages/host-service`, not the older
+desktop workspaces router. The desktop router honored the global/project
+worktree setting, but the V2 host-service path resolver hard-coded
+`~/.superset/worktrees`, so new V2 worktrees ignored the configured Windows
+location such as `D:\superset-wt`.
+
+**Files:**
+- `apps/desktop/src/main/lib/host-service-coordinator.ts`
+- `apps/desktop/src/lib/trpc/routers/settings/index.ts`
+- `packages/host-service/src/trpc/router/workspace-creation/shared/worktree-paths.ts`
+
+1. In `host-service-coordinator.ts`, read `settings.worktreeBaseDir` from
+   `localDb` in `buildEnv()` and pass it to the child host-service as
+   `SUPERSET_WORKTREE_BASE_DIR` when set.
+
+2. In `worktree-paths.ts`, have `supersetWorktreesRoot()` prefer
+   `process.env.SUPERSET_WORKTREE_BASE_DIR?.trim()` before falling back to
+   `join(homedir(), ".superset", "worktrees")`.
+
+3. In `settings/index.ts`, update `setWorktreeBaseDir` to restart active
+   host-service children after saving, the same way the relay setting restart
+   works. Otherwise a running V2 host-service keeps the old environment until
+   app restart.
+
+The intended Windows behavior is that setting the worktree folder to
+`D:\superset-wt` makes new V2 worktrees land under that base instead of
+`C:\Users\<user>\.superset\worktrees`.
+
+---
+
+## Patch 32: Copy repo-local `.superset` into V2 worktrees like V1
+
+**Why:** V1 explicitly copied `<main repo>\.superset` into new/imported
+worktrees when the worktree did not already have its own `.superset` directory.
+That matters because many projects keep `.superset` locally ignored, so `git
+worktree add` does not materialize setup/run/ports files. V2 reads setup config
+from the main repo for workspace setup, but other features and user scripts can
+still expect `./.superset/...` inside the worktree. Match V1 parity without
+overwriting worktree-specific config.
+
+**Files:**
+- `packages/host-service/src/trpc/router/workspace-creation/shared/project-superset-config.ts`
+- `packages/host-service/src/trpc/router/workspaces/workspaces.ts`
+
+1. Add a small helper that mirrors V1's `copySupersetConfigToWorktree()`:
+   ```typescript
+   import { cpSync, existsSync } from "node:fs";
+   import { join } from "node:path";
+
+   const PROJECT_SUPERSET_DIR_NAME = ".superset";
+
+   export function copyProjectSupersetConfigToWorktree(
+     repoPath: string,
+     worktreePath: string,
+   ): void {
+     const source = join(repoPath, PROJECT_SUPERSET_DIR_NAME);
+     const target = join(worktreePath, PROJECT_SUPERSET_DIR_NAME);
+
+     if (!existsSync(source) || existsSync(target)) return;
+
+     try {
+       cpSync(source, target, { recursive: true });
+     } catch (error) {
+       console.warn(
+         `Failed to copy ${PROJECT_SUPERSET_DIR_NAME} to worktree: ${error instanceof Error ? error.message : String(error)}`,
+       );
+     }
+   }
+   ```
+
+2. In `workspaces.ts`, after a newly-created/adopted workspace is persisted
+   locally and before setup terminals are started, read the local workspace row
+   and call the helper with `localProject.repoPath` and the persisted
+   `worktreePath`.
+
+This is intentionally **not** a hard override: if the worktree already has a
+`.superset` directory, V2 leaves it alone, matching V1 behavior.
+
+Scope note: this patch only restores V1's explicit `.superset` copy behavior.
+V2 still creates worktrees through `git worktree add`, so other locally ignored
+files are not copied unless they are tracked by git or handled by a separate
+setup step.
+
+---
+
+## Patch 33: Ignore stale closed PRs when matching reused branch names
+
+**Why:** V2 matches local workspaces to GitHub pull requests by branch head. If a
+branch name is reused, GitHub can return an old closed or merged PR for that
+head name, causing the workspace UI to show a stale closed PR. Keep open PRs
+eligible, but ignore historical closed/merged matches older than 30 days.
+
+**Files:**
+- `packages/host-service/src/runtime/pull-requests/utils/github-query/types.ts`
+- `packages/host-service/src/runtime/pull-requests/utils/github-query/github-query.ts`
+- `packages/host-service/src/runtime/pull-requests/utils/github-query/github-query.test.ts`
+
+1. Add `closedAt: string | null` and `mergedAt: string | null` to
+   `GitHubPullRequestNode`.
+
+2. In `normalizePullRequest()`, map REST `closed_at` and `merged_at` into those
+   fields while still deriving `state` from `merged_at`.
+
+3. Add a 30-day historical cutoff helper and filter candidates inside
+   `normalizePullRequestCandidates()`:
+   - `OPEN` PRs are never filtered by age.
+   - `MERGED` PRs use `mergedAt ?? closedAt ?? updatedAt`.
+   - `CLOSED` PRs use `closedAt ?? updatedAt`.
+
+4. Add tests proving an old closed PR is ignored and a recently closed PR still
+   matches.
+
+Run:
+```powershell
+bun test packages\host-service\src\runtime\pull-requests\utils\github-query\github-query.test.ts packages\host-service\src\runtime\pull-requests\pull-requests.test.ts
+```
+
+---
+
+## Patch 34: Preserve `&&` in V2 agent launch commands
+
+**Why:** The V2 agent settings UI labels the command field as "Argv used to
+launch the agent", but users may reasonably enter a short shell chain such as
+`clear && claude`. The parser previously dropped shell operator tokens, so after
+refresh the command became `clear claude`. Preserve `&&` through parsing,
+display, persistence, and final terminal command generation.
+
+**Files:**
+- `apps/desktop/src/renderer/lib/argv.ts`
+- `apps/desktop/src/renderer/lib/argv.test.ts`
+- `packages/host-service/src/trpc/router/agents/agents.ts`
+- `packages/host-service/src/trpc/router/agents/agents.test.ts`
+
+1. In `argv.ts`, preserve shell-quote parse tokens whose operator is `&&` when
+   parsing the command field, and render stored `&&` tokens without escaping
+   them when joining command args for display.
+
+2. In `agents.ts`, update the agent command builder so argv tokens equal to
+   `&&` are emitted as shell control operators instead of being single-quoted.
+   This makes a stored command/args shape like `command: "clear", args:
+   ["&&", "claude"]` launch as `clear && claude`.
+
+3. Add focused tests for UI round-tripping (`clear && claude` stays unchanged)
+   and command generation (`'clear' && 'claude' 'prompt'`).
+
+Run:
+```powershell
+bun test apps\desktop\src\renderer\lib\argv.test.ts packages\host-service\src\trpc\router\agents\agents.test.ts
+```
+
+---
+
+## Patch 35: Best-effort cleanup for leftover deleted worktree folders on Windows
+
+**Why:** V2 workspace deletion already removes the cloud row and asks git to
+remove the worktree, but on Windows a deleted workspace can still leave behind
+an orphaned folder tree on disk — usually `node_modules` content with pnpm
+junctions or other files git no longer tracks as a worktree. In practice the
+user sees the workspace disappear in-app, but `D:\superset-wt\...` still
+contains a branch-named folder. When the directory is locked by VS Code or
+another process, Windows returns `permission denied` / `being used by another
+process`, so the cleanup path should be best-effort and the warning should point
+at the likely lock instead of pretending the worktree still exists in git.
+
+**Files:**
+- `packages/host-service/src/trpc/router/workspace-cleanup/workspace-cleanup.ts`
+- `packages/host-service/test/workspace-cleanup.test.ts`
+
+1. In `workspace-cleanup.ts`, add helpers that:
+   - normalize cleanup error messages,
+   - detect the "missing worktree" git cases (`ENOENT`, `is not a working tree`,
+     etc.),
+   - format user-facing warnings with an extra hint for `permission denied` /
+     `Access is denied` / `EPERM`,
+   - recursively remove leftover filesystem paths after git removal succeeds or
+     partially succeeds.
+
+2. For the filesystem cleanup helper, use:
+   - `rmSync(worktreePath, { recursive: true, force: true, maxRetries, retryDelay })`
+     on Windows,
+   - a plain recursive `rmSync` on other platforms,
+   - and, if the path still exists on Windows, a fallback
+     `powershell.exe -Command "Remove-Item -LiteralPath ... -Recurse -Force"` run
+     with `windowsHide: true`.
+
+3. After a leftover path is removed successfully, also prune any now-empty
+   ancestor directories (for example the generated per-project container folder
+   under the configured worktree root) with a small helper that walks upward and
+   calls `rmSync(current, { recursive: false })` until a directory is not empty.
+
+4. In the phase-3 worktree cleanup block, keep `git worktree remove --force` as
+   the first attempt, but if git removal fails for a non-missing reason:
+   - try the leftover filesystem cleanup anyway,
+   - if that succeeds, treat the worktree as removed and retry
+     `git worktree remove --force` once so stale git metadata can clear,
+   - only surface warnings if git metadata cleanup or leftover file cleanup still
+     fails after those attempts.
+
+5. Add a regression test in `workspace-cleanup.test.ts` that simulates git
+   failing with a "directory not empty" style error on the first remove call,
+   verifies the leftover directory is actually deleted from disk, verifies the
+   git removal is retried, and verifies no warning is surfaced for that success
+   path.
+
+**Expected result:** deleting a V2 workspace should usually remove the on-disk
+worktree folder as well. If Windows still cannot remove it because another
+process is holding the directory open, the workspace delete should still succeed
+but the warning should clearly point at an external lock rather than a stale git
+worktree.
+
+---
+
+## Patch 36: Restore Windows ringtone preview playback from Settings
+
+**Why:** Notification sounds could play during normal app use, but the Settings
+page ringtone preview UI could show the sample as "playing" with no audible
+sound on Windows. The shared main-process sound helper only implemented macOS
+(`afplay`) and Linux (`paplay`/`aplay`) playback. The Settings preview path uses
+the main-process ringtone router, so on Windows the request succeeded logically
+but there was no Windows playback backend behind it.
+
+**File: `apps/desktop/src/main/lib/play-sound.ts`**
+
+1. Keep the existing macOS and Linux behavior, but add `windowsHide: true` to
+   the existing `execFile(...)` calls so sound helpers do not flash a console
+   window.
+
+2. Add a Windows-specific `process.platform === "win32"` branch before the Linux
+   path that launches `powershell.exe` with:
+   - `-NoProfile`
+   - `-NonInteractive`
+   - `-ExecutionPolicy Bypass`
+   - `-STA`
+   - an inline script that loads `PresentationCore`, constructs a
+     `System.Windows.Media.MediaPlayer`, opens the requested sound path as a
+     `System.Uri`, waits briefly for `NaturalDuration`, sets `Volume`, plays the
+     file, sleeps for the sound duration (or a short fallback timeout), then
+     stops/closes the player.
+
+3. Keep returning the spawned child process from `playSoundFile(...)` so the
+   existing ringtone preview stop/race-tracking logic continues to work. The
+   Windows preview path relies on being able to kill the child process when the
+   user clicks Stop or starts another preview.
+
+**Expected result:** the Settings > Notifications ringtone preview should produce
+audible sound on Windows, and the existing stop/replace-preview behavior should
+keep working.
+
+---
+
+## Patch 37: Derive branch slug from the typed workspace name when no prompt is provided
+
+**Why:** V2 name/branch creation has two different fallback paths:
+1. if the user provides a prompt (or an agent prompt exists), the host-service
+   can generate AI name/branch suggestions;
+2. if the branch is omitted entirely, the host-service falls back to a friendly
+   random branch name.
+
+That left a bad UX gap on Windows: if the user typed only the workspace/session
+name, left agent unselected, left the prompt blank, and left branch blank, the
+renderer submitted `branch: undefined`. The host-service then had no prompt to
+derive from, so it generated a random friendly branch (`goofy-wax`, etc.) even
+though the user had already supplied a meaningful workspace name.
+
+**Files:**
+- `apps/desktop/src/renderer/routes/_authenticated/components/DashboardNewWorkspaceModal/components/DashboardNewWorkspaceForm/PromptGroup/hooks/useSubmitWorkspace/resolveNames.ts`
+- `apps/desktop/src/renderer/routes/_authenticated/components/DashboardNewWorkspaceModal/components/DashboardNewWorkspaceForm/PromptGroup/hooks/useSubmitWorkspace/resolveNames.test.ts` (new)
+
+1. In `resolveNames.ts`, add `deriveWorkspaceBranchFromPrompt` to the
+   `@superset/shared/workspace-launch` import.
+
+2. Change the `branchName` resolution logic from:
+   - explicit user branch when `branchNameEdited`,
+   - otherwise `null`
+
+   to:
+   - explicit user branch when `branchNameEdited`,
+   - otherwise, if `workspaceNameEdited` and non-empty, derive a branch slug from
+     the typed workspace name with `deriveWorkspaceBranchFromPrompt(...)`,
+   - otherwise `null`.
+
+3. Keep the explicit user branch name path first so a typed branch still wins
+   over any derived value.
+
+4. Add a test file covering:
+   - deriving `fix-auth-flow` from a typed workspace name like `Fix auth flow`
+     when the branch field was left blank,
+   - preserving an explicitly typed branch name unchanged when both fields are
+     present.
+
+**Expected result:** if the user types only the workspace/session name, V2 uses
+that text to seed the branch slug instead of falling back to a random
+friendly-words branch name.
+
+---
+
+## Patch 38: Never auto-fallback to Windows PowerShell for V2 terminals
+
+**Why:** Patch 30 fixed the main `cmd.exe` issue by preferring `pwsh`, but it
+still allowed an automatic fallback to legacy Windows PowerShell
+(`powershell.exe`). That keeps an intermittent wrong-shell path alive: if `pwsh`
+resolution fails because of environment differences, Store alias quirks, or a
+timing-dependent lookup path, some terminals can still open in the old shell.
+For the default Windows experience, legacy PowerShell should be **opt-in only**,
+not an automatic fallback.
+
+**File: `packages/host-service/src/terminal/shell-launch.ts`**
+
+1. Keep the existing POSIX behavior unchanged.
+
+2. Tighten the Windows resolver policy:
+   - keep honoring an explicit `SUPERSET_TERMINAL_SHELL` override first,
+   - otherwise resolve **only** `pwsh` / PowerShell 7 candidates,
+   - if no valid `pwsh` is found, fall back to `COMSPEC` / `cmd.exe`,
+   - do **not** auto-select `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`.
+
+3. Keep the existing real-path `pwsh` search from Patch 30, but add a final
+   validation step before accepting a candidate:
+   - the executable basename should be `pwsh` / `pwsh.exe`, and
+   - a lightweight version probe such as
+     `-NoLogo -NoProfile -Command "$PSVersionTable.PSVersion.Major"` must return
+     `7` or higher.
+
+   Reject candidates that fail the probe, point at a legacy shim, or resolve to
+   `powershell.exe`.
+
+4. Cache the resolved Windows shell path once per app session after the first
+   successful lookup. Reuse that exact path for later terminal launches instead
+   of re-running the full search each time. That removes per-terminal
+   nondeterminism from environment snapshots and Store alias resolution.
+
+5. If a user truly wants Windows PowerShell, keep allowing it only through an
+   explicit override (`SUPERSET_TERMINAL_SHELL=powershell.exe` or full path).
+
+**Expected result:** a normal new V2 terminal on Windows should open in
+PowerShell 7 (`pwsh`) every time it is available. Legacy Windows PowerShell
+should never appear unless the user explicitly asks for it.
+
+---
+
 ## Verification Checklist
 
 After applying all patches, verify:
-- [ ] `bun install` completes (bufferutil warning is expected and non-fatal)
+- [ ] `bun install` completes on Windows without hanging on `macos-process-metrics` (bufferutil warning is expected and non-fatal)
 - [ ] `bun run compile:app` builds with 0 TypeScript errors
+- [ ] `bun run copy:native-modules` completes without EPERM on `@superset/macos-process-metrics`
 - [ ] `electron dist/main/index.js` launches without TDZ or path errors
 - [ ] Terminal opens without "Connection lost" or "PTY not spawned" errors
+- [ ] V2 terminal settings show `pty-daemon` running, not "daemon unavailable"
+- [ ] V2 terminal opens without `node-pty master fd unavailable`
+- [ ] New V2 terminal opens in `pwsh`/PowerShell 7 on Windows, never legacy `powershell.exe` unless explicitly overridden
+- [ ] New V2 worktrees honor the configured worktree base directory
+- [ ] New V2 worktrees include repo-local `.superset` files when the worktree is missing `.superset`
+- [ ] V2 Claude/Codex preset can start a terminal session
+- [ ] In V2 mode, switching workspace tabs is instant (no UI freeze, no `cmd.exe` window flash)
 - [ ] Agent launch (click Claude/Codex) auto-executes the command (no manual Enter needed)
 - [ ] Changes panel loads (no "Unable to load changes")
 - [ ] "Open in VS Code" works
 - [ ] Notification sounds and ringtone preview play correctly on Windows
+- [ ] Deleting a V2 workspace removes the on-disk worktree folder, or surfaces a clear lock/permission warning when another process still has it open
+- [ ] Creating a V2 workspace with only a typed workspace name derives the branch from that name instead of using a random friendly branch
 - [ ] Ctrl+Shift+1/2/3 switches workspaces on Windows (⌘+1/2/3 on macOS)
 - [ ] Sidebar tooltip shows "Ctrl+Shift+1" on Windows instead of "⌘1"
 - [ ] Ctrl+C copies selected text in terminal, sends interrupt when nothing selected (Windows)
@@ -1130,3 +2030,4 @@ After applying all patches, verify:
 - [ ] Quit confirmation dialog appears BEFORE window closes on Windows
 - [ ] New terminal renders cleanly without garbled/overlapping text on Windows
 - [ ] NSIS installer builds successfully
+- [ ] V1 note: terminal connectivity should work, but workspace switching may still freeze on Windows; prefer V2

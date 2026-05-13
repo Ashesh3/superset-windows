@@ -102,6 +102,21 @@ jobs:
         shell: bash
         run: bun install
 
+      - name: Rebuild better-sqlite3 against target Electron ABI
+        working-directory: superset/apps/desktop
+        shell: bash
+        run: |
+          # See PATCHES.md "Patch 23". electron-builder install-app-deps tries
+          # to rebuild every native module including upstream node-pty, which
+          # fails on runners without the MSVC v143 Spectre-mitigated libs
+          # component (MSB8040). When that rebuild aborts, better-sqlite3 is
+          # left with the wrong NODE_MODULE_VERSION and the installer crashes
+          # on first launch. Explicitly rebuild only better-sqlite3 here.
+          ELECTRON_VERSION=$(node -p "require('./package.json').devDependencies.electron")
+          REBUILD_CLI=$(ls -d ../../node_modules/.bun/@electron+rebuild@*/node_modules/@electron/rebuild/lib/cli.js | head -n 1)
+          echo "Rebuilding better-sqlite3 for Electron $ELECTRON_VERSION via $REBUILD_CLI"
+          node "$REBUILD_CLI" -v "$ELECTRON_VERSION" -w better-sqlite3 --only better-sqlite3
+
       - name: Generate file icons
         working-directory: superset/apps/desktop
         shell: bash
