@@ -1212,7 +1212,7 @@ cpSync(realPath, modulePath, { recursive: true, dereference: true });
 ```
 ---
 
-## Patch 26: Force `windowsHide: true` for all child_process spawns on Windows
+## Patch 23: Force `windowsHide: true` for all child_process spawns on Windows
 
 **Files:**
 - `apps/desktop/src/main/lib/windows-child-process-patch.ts` (new)
@@ -1248,23 +1248,22 @@ import { installWindowsChildProcessPatch } from "./lib/windows-child-process-pat
 installWindowsChildProcessPatch();
 ```
 
-This is a defense-in-depth measure on top of the targeted fixes in
-Patches 24 and 25; together they should eliminate the
+This is a defense-in-depth measure that, together with the targeted fixes above, should eliminate the
 console-window flash on workspace tab switches and any other UI flow
 that ends up spawning a Windows console-subsystem child.
 
 **1.8.9 validation note:** these V1 freeze mitigations reduced
 console-window flashes and fixed V1 terminal connectivity after Patch 8, but
 V1 can still freeze when switching workspaces on Windows. The validated path
-for 1.8.9 is V2 mode after applying the V2 fixes in Patches 27, 28,
-30, and 31, plus the Windows launcher/preset fixes in Patches 13 and 15:
+for 1.8.9 is V2 mode after applying the V2 fixes in Patches 24, 25,
+26, and 27, plus the Windows launcher/preset fixes in Patches 13 and 15:
 terminals work, presets auto-execute, PowerShell 7 is selected when available,
 configured worktree roots are honored, "Open in VS Code" works, and workspace
 switching no longer freezes.
 
 ---
 
-## Patch 27: Use Windows named pipes for the V2 `pty-daemon`
+## Patch 24: Use Windows named pipes for the V2 `pty-daemon`
 
 **Files:**
 - `packages/host-service/src/daemon/DaemonSupervisor.ts`
@@ -1353,14 +1352,14 @@ instead of "daemon unavailable".
 
 ---
 
-## Patch 28: Disable Unix fd-handoff assumptions for V2 terminals on Windows
+## Patch 25: Disable Unix fd-handoff assumptions for V2 terminals on Windows
 
 **Files:**
 - `packages/pty-daemon/src/Pty/Pty.ts`
 - `packages/pty-daemon/src/Server/Server.ts`
 - `packages/host-service/src/daemon/DaemonSupervisor.ts`
 
-**Why:** Once Patch 27 lets the V2 daemon start, opening a V2 terminal on
+**Why:** Once Patch 24 lets the V2 daemon start, opening a V2 terminal on
 Windows can fail with:
 
 ```text
@@ -1438,7 +1437,7 @@ handle-transfer implementation exists.
 
 ---
 
-## Patch 30: Prefer PowerShell 7 for V2 terminals on Windows
+## Patch 26: Prefer PowerShell 7 for V2 terminals on Windows
 
 **Why:** V2 terminals defaulted to `COMSPEC`, which normally points at
 `cmd.exe`. Users could only force PowerShell by launching the app through a
@@ -1484,7 +1483,7 @@ can set `SUPERSET_TERMINAL_SHELL` before launching the app.
 
 ---
 
-## Patch 31: Honor configured worktree base dir in V2 host-service
+## Patch 27: Honor configured worktree base dir in V2 host-service
 
 **Why:** V2 workspace creation runs in `packages/host-service`, not the older
 desktop workspaces router. The desktop router honored the global/project
@@ -1516,7 +1515,7 @@ The intended Windows behavior is that setting the worktree folder to
 
 ---
 
-## Patch 32: Copy repo-local `.superset` into V2 worktrees like V1
+## Patch 28: Copy repo-local `.superset` into V2 worktrees like V1
 
 **Why:** V1 explicitly copied `<main repo>\.superset` into new/imported
 worktrees when the worktree did not already have its own `.superset` directory.
@@ -1571,7 +1570,7 @@ setup step.
 
 ---
 
-## Patch 34: Preserve `&&` in V2 agent launch commands
+## Patch 29: Preserve `&&` in V2 agent launch commands
 
 **Why:** The V2 agent settings UI labels the command field as "Argv used to
 launch the agent", but users may reasonably enter a short shell chain such as
@@ -1604,7 +1603,7 @@ bun test apps\desktop\src\renderer\lib\argv.test.ts packages\host-service\src\tr
 
 ---
 
-## Patch 35: Best-effort cleanup for leftover deleted worktree folders on Windows
+## Patch 30: Best-effort cleanup for leftover deleted worktree folders on Windows
 
 **Why:** V2 workspace deletion already removes the cloud row and asks git to
 remove the worktree, but on Windows a deleted workspace can still leave behind
@@ -1664,7 +1663,7 @@ worktree.
 
 ---
 
-## Patch 36: Restore Windows ringtone preview playback from Settings
+## Patch 31: Restore Windows ringtone preview playback from Settings
 
 **Why:** Notification sounds could play during normal app use, but the Settings
 page ringtone preview UI could show the sample as "playing" with no audible
@@ -1702,7 +1701,7 @@ keep working.
 
 ---
 
-## Patch 37: Derive branch slug from the typed workspace name when no prompt is provided
+## Patch 32: Derive branch slug from the typed workspace name when no prompt is provided
 
 **Why:** V2 name/branch creation has two different fallback paths:
 1. if the user provides a prompt (or an agent prompt exists), the host-service
@@ -1748,9 +1747,9 @@ friendly-words branch name.
 
 ---
 
-## Patch 38: Never auto-fallback to Windows PowerShell for V2 terminals
+## Patch 33: Never auto-fallback to Windows PowerShell for V2 terminals
 
-**Why:** Patch 30 fixed the main `cmd.exe` issue by preferring `pwsh`, but it
+**Why:** Patch 26 fixed the main `cmd.exe` issue by preferring `pwsh`, but it
 still allowed an automatic fallback to legacy Windows PowerShell
 (`powershell.exe`). That keeps an intermittent wrong-shell path alive: if `pwsh`
 resolution fails because of environment differences, Store alias quirks, or a
