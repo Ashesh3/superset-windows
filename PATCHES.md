@@ -14,33 +14,7 @@ bun run copy:native-modules
 CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --win --publish never --config electron-builder.ts
 ```
 
-### Current validated Windows 1.8.9+ state
-
-The current known-good Windows path is **V2 mode**. V2 terminals use Windows
-named pipes, skip Unix fd handoff, open in PowerShell 7 when available, honor
-the configured worktree base directory, auto-execute Claude/Codex preset
-commands, and let "Open in VS Code" resolve normal per-user Windows installs
-without waiting for `Code.exe` to exit. V2 workspace tab switching no longer
-freezes or flashes a `cmd.exe` window. Repo-local project config directories
-remain named `.superset`. The resource monitor remains enabled; retesting
-showed it was not the remaining V2 freeze cause after the terminal/workspace
-fixes.
-
-V1 terminal connectivity works after the earlier terminal-host patches, but V1
-can still freeze when switching workspaces on Windows. Prefer V2 on Windows
-unless specifically investigating V1.
-
-Before packaging Superset 1.8.9+ on Windows, also apply the build notes in
-Patch 29: use a Windows-compatible Bun version, enable Git long paths, rebuild
-`better-sqlite3` for the target Electron ABI, and avoid broad native-module
-rebuilds that can fail on unrelated optional modules. Patches 33 and 34 capture
-later V2 refinements for reused branch names and custom agent launch commands.
-Patches 35, 36, and 37 capture later Windows cleanup and UX fixes:
-best-effort removal of leftover deleted worktree folders, working ringtone
-preview playback from Settings, and deriving the branch slug from the typed
-workspace name when no prompt/branch is supplied. Patch 38 hardens Windows
-shell selection so V2 terminals do not silently fall back to legacy Windows
-PowerShell.
+The installer will be at `apps/desktop/release/Superset-<version>-x64.exe`.
 
 ---
 
@@ -654,14 +628,11 @@ Find the `"build"` script. Add `--config electron-builder.ts` to the electron-bu
    ```
 
    Key Windows app configs:
-   - **vscode**: try `bin\\code.cmd` first, then `Code.exe`, then CLI `code`; install dir `Microsoft VS Code`
+   - **vscode**: cli `code`, exe `Code.exe`, install dir `Microsoft VS Code`
    - **cursor**: cli `cursor`, exe `Cursor.exe`, install dir `Cursor`
    - **terminal**: cli `wt`, exe `wt.exe`/`WindowsTerminal.exe`, args `["-d", targetDir]`
    - **JetBrains IDEs**: search `Program Files/JetBrains/<product>/bin/<exe>` and Toolbox paths
    - **macOS-only apps** (xcode, iterm, appcode): empty config `{}`
-   - Keep the CLI fallback after discovered exe paths, so systems with `code` on
-     `PATH` still work, but normal per-user VS Code installs under
-     `%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe` do not require it.
 
 3. In `getAppCommand()`, add a `win32` check at the top before the `darwin` check:
    ```typescript
@@ -1239,104 +1210,6 @@ to:
 // copyfile when the destination cannot create the same junction.
 cpSync(realPath, modulePath, { recursive: true, dereference: true });
 ```
-
----
-
-## Patch 23: Force better-sqlite3 rebuild against target Electron ABI
-
-**Why:** Electron 40.x ships Node ABI `NODE_MODULE_VERSION 143`, but Bun's store contains a `better-sqlite3` `.node` binary built against an older ABI (e.g. 141). At runtime the installed app crashes on first launch with:
-
-```
-Error: The module '...\better_sqlite3.node' was compiled against a different
-Node.js version using NODE_MODULE_VERSION 141. This version of Node.js requires
-NODE_MODULE_VERSION 143.
-```
-
-The postinstall script does call `electron-builder install-app-deps` (which delegates to `@electron/rebuild`), but that command tries to rebuild **every** native module in the tree — including upstream `node-pty@1.1.0`, which fails to compile on Windows runners that don't have the "MSVC v143 Spectre-mitigated libs" component installed (`error MSB8040`). When the rebuild step aborts mid-way, `better-sqlite3` is left with whatever stale ABI was in the Bun store, and the asar packager copies that broken binary into the installer.
-
-We don't actually use upstream `node-pty` — Patch 10 swaps it for `@lydell/node-pty` which ships prebuilds — so its rebuild failure is irrelevant to runtime. The fix is to explicitly rebuild only `better-sqlite3` against the target Electron version after `bun install`, before `copy:native-modules`. This makes the build deterministic regardless of which optional MSVC components are installed on the runner.
-
-**No source file changes.** This is enforced by the build pipeline: the nightly workflow runs an explicit `electron-rebuild -w better-sqlite3 --only better-sqlite3` step. When building locally, run the same command from `apps/desktop` after `bun install`:
-
-```powershell
-cd apps\desktop
-$ELECTRON_VERSION = (Get-Content package.json | ConvertFrom-Json).devDependencies.electron
-node ..\..\node_modules\.bun\@electron+rebuild@*\node_modules\@electron\rebuild\lib\cli.js `
-  -v $ELECTRON_VERSION -w better-sqlite3 --only better-sqlite3
-bun run copy:native-modules
-```
-
----
-
-## Patch 24: Disable GitHub `gh` polling and hide cmd window flash on Windows
-
-**Files:**
-- `apps/desktop/src/renderer/lib/githubQueryPolicy/githubQueryPolicy.ts`
-- `apps/desktop/src/lib/trpc/routers/workspaces/utils/shell-env.ts`
-- `apps/desktop/src/lib/trpc/routers/workspaces/utils/git-client.ts`
-
-**Why:** On Windows, every `gh` (and `git`) invocation goes through Node's
-`child_process.execFile`, which by default does **not** pass `windowsHide:
-true`. Each spawn flashes a `cmd.exe` console window for ~1–2s and stalls
-the Electron main process briefly while the (Go-based) `gh` binary
-initializes — a problem amplified by Defender / corporate AV scanning the
-binary on every launch. The renderer polls `gh` every 10s for PR status
-and 30s for PR comments, and re-fetches on focus and on workspace mount.
-The result: clicking a workspace tab consistently freezes the UI for a
-beat and pops a black console window before snapping back.
-
-**Fix:**
-
-1. In `githubQueryPolicy.ts`, force both policy helpers to return
-   `enabled: false`, `refetchInterval: false`, `refetchOnWindowFocus: false`
-   so React Query never spawns `gh` automatically. Replace the bodies of
-   `getGitHubStatusQueryPolicy` and `getGitHubPRCommentsQueryPolicy` with
-   a constant disabled policy. Keep the existing `staleTime` constants for
-   type compatibility with callers.
-
-2. In `shell-env.ts` (`execWithShellEnv`), add `windowsHide: true` to **both**
-   `execFileAsync(cmd, args, { … })` calls (the initial call and the
-   PATH-retry path).
-
-3. In `git-client.ts` (`execGitWithShellPath`), add `windowsHide: true` to
-   the `execFileAsync("git", args, { … })` call.
-
-These two fixes are layered on purpose: (1) eliminates the recurring
-freezes on tab switch / focus / interval, (2) ensures any remaining
-explicit `gh`/`git` invocations (PR create, merge, repo-context refresh,
-etc.) don't pop a console window.
-
-> **Note:** The matching test file
-> `apps/desktop/src/renderer/lib/githubQueryPolicy/githubQueryPolicy.test.ts`
-> asserts the old polling behavior. It is acceptable for these tests to
-> fail after this patch — they are not run by the Windows build pipeline
-> (`bun run compile:app` + `electron-builder`). Do not re-enable polling
-> to make them pass.
-
----
-
-## Patch 25: (REMOVED — keep resource metrics enabled on Windows)
-
-**File:** `apps/desktop/src/main/lib/resource-metrics/index.ts`
-
-This patch has been intentionally removed from the current 1.8.9 Windows
-working state. The TopBar `ResourceConsumption` widget polls
-`resourceMetrics.getSnapshot` every 15s (idle) / 2s (open). On Windows the
-implementation in `process-tree.ts` shells out to
-`powershell -NoProfile -Command "Get-CimInstance Win32_Process …"` via
-`child_process.exec` (which uses `cmd.exe`), and `pidusage` uses `wmic` the
-same way. This was suspected as a freeze source, so an earlier attempt
-short-circuited `collectResourceMetrics` on Windows and returned empty
-snapshots.
-
-Retesting after the V2 terminal/workspace fixes showed the freeze does **not**
-return when resource metrics are enabled. Patch 26's global `windowsHide: true`
-child-process wrapper prevents console-window flashes from these shell-outs, so
-the monitor can stay functional.
-
-**No changes needed.** Do not add a Windows early return to
-`collectResourceMetrics`.
-
 ---
 
 ## Patch 26: Force `windowsHide: true` for all child_process spawns on Windows
@@ -1565,55 +1438,6 @@ handle-transfer implementation exists.
 
 ---
 
-## Patch 29: Current Windows build notes for Superset 1.8.9+
-
-These lessons came from a validated 1.8.9 Windows rebuild and should be
-checked when applying the older patches above to newer upstream Superset
-versions:
-
-- **Use V2 mode on Windows:** a validated 1.8.9 build confirmed V2 as the
-  working Windows path. V2 terminals work after Patches 27 and 28, presets
-  auto-execute after Patch 15, PowerShell 7 is preferred after Patch 30,
-  configured worktree roots are honored after Patch 31, and the workspace
-  tab-switch freeze is gone there. Patch 13 is also required for reliable
-  Windows "Open in VS Code" behavior. V1 terminal connectivity works after
-  Patch 8, but V1 may still freeze on workspace switches.
-- **Bun:** Bun 1.3.11 can segfault on Windows. Upgrade Bun before install.
-  Stable Bun 1.3.13 worked for the 1.8.9 build; canary may also work, but
-  verify `bun install` after switching.
-- **Long paths:** always run `git config core.longpaths true` before
-  cloning/installing. Bun's isolated linker creates very deep paths.
-- **node-pty:** upstream `node-pty@1.1.0` already ships Windows prebuilds in
-  current Superset. Do **not** blindly apply the older `@lydell/node-pty`
-  swap if current upstream is already on `node-pty@1.1.0` and packaging
-  includes the native prebuilds.
-- **better-sqlite3:** rebuild it against the target Electron version after
-  native modules are materialized. For Electron 40.8.5:
-
-  ```powershell
-  node node_modules\.bun\@electron+rebuild@4.0.3\node_modules\@electron\rebuild\lib\cli.js `
-    --version 40.8.5 --module-dir apps\desktop --only better-sqlite3 --force
-  ```
-
-- **electron-builder rebuilds:** on Windows, set
-  `npmRebuild: process.platform !== "win32"` in `electron-builder.ts` after
-  doing the targeted `better-sqlite3` rebuild. Letting electron-builder
-  rebuild everything can fail on `node-pty` if the machine lacks the MSVC
-  Spectre libraries, even though runtime prebuilds are present.
-- **copy-native-modules:** use both `rmSync(path, { recursive: true, force:
-  true })` for Windows junction removal and `cpSync(..., { recursive: true,
-  dereference: true })` for nested Bun store junctions.
-- **blockmaps:** disable NSIS differential/blockmap generation for local
-  Windows attempts if blockmap signing/packaging is noisy:
-
-  ```ts
-  nsis: {
-    differentialPackage: false,
-  }
-  ```
-
----
-
 ## Patch 30: Prefer PowerShell 7 for V2 terminals on Windows
 
 **Why:** V2 terminals defaulted to `COMSPEC`, which normally points at
@@ -1744,40 +1568,6 @@ Scope note: this patch only restores V1's explicit `.superset` copy behavior.
 V2 still creates worktrees through `git worktree add`, so other locally ignored
 files are not copied unless they are tracked by git or handled by a separate
 setup step.
-
----
-
-## Patch 33: Ignore stale closed PRs when matching reused branch names
-
-**Why:** V2 matches local workspaces to GitHub pull requests by branch head. If a
-branch name is reused, GitHub can return an old closed or merged PR for that
-head name, causing the workspace UI to show a stale closed PR. Keep open PRs
-eligible, but ignore historical closed/merged matches older than 30 days.
-
-**Files:**
-- `packages/host-service/src/runtime/pull-requests/utils/github-query/types.ts`
-- `packages/host-service/src/runtime/pull-requests/utils/github-query/github-query.ts`
-- `packages/host-service/src/runtime/pull-requests/utils/github-query/github-query.test.ts`
-
-1. Add `closedAt: string | null` and `mergedAt: string | null` to
-   `GitHubPullRequestNode`.
-
-2. In `normalizePullRequest()`, map REST `closed_at` and `merged_at` into those
-   fields while still deriving `state` from `merged_at`.
-
-3. Add a 30-day historical cutoff helper and filter candidates inside
-   `normalizePullRequestCandidates()`:
-   - `OPEN` PRs are never filtered by age.
-   - `MERGED` PRs use `mergedAt ?? closedAt ?? updatedAt`.
-   - `CLOSED` PRs use `closedAt ?? updatedAt`.
-
-4. Add tests proving an old closed PR is ignored and a recently closed PR still
-   matches.
-
-Run:
-```powershell
-bun test packages\host-service\src\runtime\pull-requests\utils\github-query\github-query.test.ts packages\host-service\src\runtime\pull-requests\pull-requests.test.ts
-```
 
 ---
 
