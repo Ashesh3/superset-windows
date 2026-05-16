@@ -18,6 +18,36 @@ The installer will be at `apps/desktop/release/Superset-<version>-x64.exe`.
 
 ---
 
+## Patch 0: Pin Mastra packages past Bun's release-age window
+
+**Why:** Upstream `desktop-v1.9.6` pins `@mastra/core@1.33.1` and `mastracode@0.18.1`. The repository's `bunfig.toml` has `minimumReleaseAge = 259200`, so Bun refuses to install package versions published within the last 72 hours. Pin to the closest older versions that satisfy the release-age policy.
+
+**File: `package.json` (root)**
+In the existing `"overrides"` object, keep the existing `axios` override and add:
+```json
+"@mastra/core": "1.33.0",
+"mastracode": "0.18.0"
+```
+
+**Files:**
+- `apps/desktop/package.json`
+- `packages/chat/package.json`
+- `packages/host-service/package.json`
+
+In each file, change dependency values from:
+```json
+"@mastra/core": "1.33.1",
+"mastracode": "0.18.1"
+```
+
+to:
+```json
+"@mastra/core": "1.33.0",
+"mastracode": "0.18.0"
+```
+
+---
+
 ## Patch 1: Cross-platform postinstall script
 
 **Why:** The default `postinstall.sh` is bash-only and fails on Windows.
